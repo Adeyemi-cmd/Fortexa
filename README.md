@@ -171,7 +171,26 @@ The policy decision authorizes a fixed payment quote (destination, amount, asset
 
 Client-side UI must pass the same `paymentQuoteInput` at decision time and reuse the returned `auditEntry.id` when building XDR. Mutating any authorized field after approval cannot produce a valid unsigned transaction.
 
-**Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Results are stored per authenticated user + key + signed-XDR hash. Replaying the same key with the same signed XDR returns the original result (`200`, with header `Idempotency-Replayed: true`) without resubmitting to Horizon. Reusing the same key with a different signed XDR returns `409 Conflict`. Omitting the key preserves the original submit-on-every-request behavior. Keys must be 8–255 characters.
+**Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Keys must be 8–255 characters.
+
+A request is identified by `sha256(idempotency key + canonical payment body)`, where the canonical body is the validated request body serialized with sorted keys and with the key fields removed — so a header key and a body key for the same payment hash identically, and the store and the route can never disagree about what "the same request" means.
+
+The key is **claimed** before the transaction is sent to Horizon, so a retry that arrives while the original is still in flight waits for it instead of submitting a second payment:
+
+| Situation | Behavior |
+|---|---|
+| First request under the key | Claims the key (`in_flight`), submits, then stores the status, transaction id, and response body |
+| Retry, same key + same body, original already settled | Returns the stored status and transaction id verbatim with `Idempotency-Replayed: true`; no Horizon call |
+| Retry, same key + same body, original still in flight | Waits up to `FORTEXA_IDEMPOTENCY_IN_FLIGHT_WAIT_MS` (default 5s) for the original result, then replays it; if it never settles, `409` with `code: idempotency_in_flight` and `Retry-After: 1` |
+| Retry, same key + different body (e.g. different destination) | `409 Conflict` immediately, no Horizon call and no second payment built |
+| Original submit failed | Claim is released, so the client can retry the key |
+| Transaction submitted but storing the result failed | The accepted response (with the real transaction id) is still returned and the claim is deliberately left in flight, so the ledger is not hidden behind a 500 that would invite a blind resubmit; the lease expiry is what eventually frees the key |
+
+Only the caller that claimed the key may submit. Claims carry a lease, so a process that dies mid-submit does not brick the key. `PUT`-style first-write-wins applies to the settle step too: a late duplicate can never replace the stored transaction id. Omitting the key preserves the original submit-on-every-request behavior.
+
+Records expire on the existing cleanup path (`maybeRunCleanup`, at most hourly) after `FORTEXA_IDEMPOTENCY_RETENTION_DAYS`. Cleanup never drops a record that is still in flight — only abandoned claims whose lease has expired are collectable.
+
+> Migration note: records written before the claim columns existed carry only a signed-XDR hash, which cannot prove request identity. They fail closed with `409` instead of replaying, and expire normally.
 
 Additional behavior:
 - XDR build timeout configured to 180 seconds.
@@ -280,7 +299,7 @@ The file covers every variable used by the app, organized into:
 | **Auth** | `FORTEXA_AUTH_SECRET`, `FORTEXA_OPERATOR_WALLETS`, `FORTEXA_VIEWER_WALLETS`, `FORTEXA_AUTH_CHALLENGE_TTL_SECONDS`, `FORTEXA_AUTH_MAX_ATTEMPTS`, `FORTEXA_AUTH_LOCK_MINUTES` |
 | **Storage** | `DATABASE_URL`, `DATABASE_SSL`, `FORTEXA_STORE_DIR` |
 | **Shared State** | `FORTEXA_SHARED_STATE_PATH`, `REDIS_URL` |
-| **Idempotency** | `FORTEXA_IDEMPOTENCY_RETENTION_DAYS` |
+| **Idempotency** | `FORTEXA_IDEMPOTENCY_RETENTION_DAYS`, `FORTEXA_IDEMPOTENCY_IN_FLIGHT_WAIT_MS` |
 | **Optional Integrations** | `GROQ_API_KEY`, `GROQ_MODEL`, `FORTEXA_BLOCKLIST_URL` |
 | **Request Handling** | `FORTEXA_JSON_BODY_MAX_BYTES` |
 | **Dev Utilities** | `FORTEXA_ALLOW_LOCAL_RESET` |
@@ -409,6 +428,9 @@ Otherwise Fortexa falls back to local JSON files:
 - local/dev default: `.fortexa/*.json`
 - Vercel default: `/tmp/fortexa/*.json`
 
+File-store writes are atomic (unique staging file + rename) so a crashed write can
+never leave a half-written store behind.
+
 Optional overrides:
 - `FORTEXA_STORE_DIR` to set file-store directory explicitly
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
@@ -434,7 +456,7 @@ Optional overrides:
 - **Charts:** `recharts`
 - **Stellar:** `@stellar/stellar-sdk`, optional `@stellar/freighter-api`
 - **Database:** `pg` (optional Postgres, file fallback enabled)
-- **Tests:** Vitest
+- **Tests:** Vitest (`vitest.setup.ts` gives each test file its own file-store directory so parallel suites cannot clobber each other)
 
 ---
 

@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 
 import { defaultPolicyConfig } from "@/lib/policy/engine";
+import { writeJsonFileAtomic } from "@/lib/storage/atomic-write";
 import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { PolicyConfig } from "@/lib/types/domain";
@@ -35,7 +36,7 @@ async function ensureStore() {
       updatedAt: new Date().toISOString(),
       version: 1,
     };
-    await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
+    await writeJsonFileAtomic(storePath, initial);
   }
 
   try {
@@ -52,7 +53,7 @@ async function ensureStore() {
       ],
     };
 
-    await fs.writeFile(historyPath, JSON.stringify(initialHistory, null, 2), "utf8");
+    await writeJsonFileAtomic(historyPath, initialHistory);
   }
 }
 
@@ -69,7 +70,7 @@ async function readStore() {
       version: 1,
     };
 
-    await fs.writeFile(storePath, JSON.stringify(reset, null, 2), "utf8");
+    await writeJsonFileAtomic(storePath, reset);
     return reset;
   }
 }
@@ -92,7 +93,7 @@ async function readHistoryStore() {
       ],
     };
 
-    await fs.writeFile(historyPath, JSON.stringify(reset, null, 2), "utf8");
+    await writeJsonFileAtomic(historyPath, reset);
     return reset;
   }
 }
@@ -118,18 +119,13 @@ async function writeStore(nextPolicy: PolicyConfig, nextVersion: number) {
     version: nextVersion,
   };
 
-  const tempPath = `${storePath}.tmp`;
-  await fs.writeFile(tempPath, JSON.stringify(next, null, 2), "utf8");
-  await fs.rename(tempPath, storePath);
+  await writeJsonFileAtomic(storePath, next);
 
   return next;
 }
 
 async function writeHistory(entries: PolicyHistoryEntry[]) {
-  const next: PolicyHistoryFile = { entries };
-  const tempPath = `${historyPath}.tmp`;
-  await fs.writeFile(tempPath, JSON.stringify(next, null, 2), "utf8");
-  await fs.rename(tempPath, historyPath);
+  await writeJsonFileAtomic(historyPath, { entries });
 }
 
 async function ensureDbPolicyState() {

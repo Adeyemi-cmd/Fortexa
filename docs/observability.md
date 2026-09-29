@@ -34,7 +34,7 @@ All series are labeled by `route` (Next.js route path, e.g. `/api/decision`) and
 | `fortexa_request_errors_total` | counter | Requests that returned HTTP >= 400 |
 | `fortexa_request_duration_ms_p95` | gauge | Rolling p95 latency in milliseconds (last 500 samples per bucket) |
 | `fortexa_decision_outcomes_total` | counter | Decision evaluations labelled by `outcome` (APPROVE \| WARN \| REQUIRE_APPROVAL \| BLOCK) |
-| `fortexa_stellar_submit_results_total` | counter | Stellar submission attempts labelled by `result` (success \| horizon_failure \| validation_failure \| idempotency_replay \| idempotency_conflict) |
+| `fortexa_stellar_submit_results_total` | counter | Stellar submission attempts labelled by `result` (success \| horizon_failure \| validation_failure \| idempotency_replay \| idempotency_conflict \| idempotency_in_flight) |
 
 Sample output:
 

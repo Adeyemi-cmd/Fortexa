@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 
 import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
+import { writeJsonFileAtomic } from "@/lib/storage/atomic-write";
 import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
@@ -85,7 +86,7 @@ async function ensureStore() {
       auditByUser: {},
       usageByUser: {},
     };
-    await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
+    await writeJsonFileAtomic(storePath, initial);
   }
 }
 
@@ -96,7 +97,7 @@ async function readStore(): Promise<AuditStoreFile> {
 }
 
 async function writeStore(store: AuditStoreFile) {
-  await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf8");
+  await writeJsonFileAtomic(storePath, store);
 }
 
 export async function getAuditEntryById(userId: string, entryId: string) {

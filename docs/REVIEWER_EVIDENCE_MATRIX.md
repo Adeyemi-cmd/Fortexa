@@ -11,7 +11,7 @@ This document maps Fortexa's core security and payment claims directly to the co
 - [ ] **Signed-XDR only payment path**: Verify API only accepts signed XDR in `src/app/api/stellar/submit-signed/route.ts` and client builds unsigned in `src/lib/stellar/client.ts`.
 - [ ] **Audit hash-chain integrity**: Verify hashing mechanism in `src/lib/audit/hash-chain.ts`.
 - [ ] **Metrics and ops visibility**: Verify structured logging and metrics in `src/lib/observability/metrics.ts` and `src/lib/observability/logger.ts`.
-- [ ] **Idempotent submit behavior**: Verify deduplication logic via `xdrHash` in `src/app/api/stellar/submit-signed/route.ts`.
+- [ ] **Idempotent submit behavior**: Verify the key claim / canonical body hash / stored-result replay logic in `src/lib/storage/submit-idempotency-store.ts` and `src/app/api/stellar/submit-signed/route.ts`.
 - [ ] **No server-side private-key custody**: Verify absence of backend signing (`Keypair.fromSecret()`) in `src/lib/stellar/client.ts`.
 
 ## Detailed Evidence Mapping
@@ -25,7 +25,7 @@ This document maps Fortexa's core security and payment claims directly to the co
 | **Signed-XDR only payment path** | [`src/app/api/stellar/submit-signed/route.ts`](../src/app/api/stellar/submit-signed/route.ts)<br>[`src/lib/stellar/client.ts`](../src/lib/stellar/client.ts) | `src/lib/stellar/verify-payment-quote.test.ts` |
 | **Audit hash-chain integrity** | [`src/lib/audit/hash-chain.ts`](../src/lib/audit/hash-chain.ts) | `src/lib/audit/hash-chain.test.ts` |
 | **Metrics and ops visibility** | [`src/lib/observability/metrics.ts`](../src/lib/observability/metrics.ts)<br>[`src/lib/observability/logger.ts`](../src/lib/observability/logger.ts) | `src/lib/observability/metrics.test.ts` |
-| **Idempotent submit behavior** | [`src/app/api/stellar/submit-signed/route.ts`](../src/app/api/stellar/submit-signed/route.ts) | |
+| **Idempotent submit behavior** | [`src/app/api/stellar/submit-signed/route.ts`](../src/app/api/stellar/submit-signed/route.ts)<br>[`src/lib/storage/submit-idempotency-store.ts`](../src/lib/storage/submit-idempotency-store.ts) | `src/app/api/stellar/submit-signed-idempotency.test.ts`<br>`src/lib/storage/submit-idempotency-store.test.ts`<br>`src/lib/storage/submit-idempotency-cleanup.test.ts` |
 | **No server-side private-key custody** | [`src/lib/stellar/client.ts`](../src/lib/stellar/client.ts) | |
 
 ## Honest Limitations
@@ -33,5 +33,5 @@ This document maps Fortexa's core security and payment claims directly to the co
 To maintain transparency for SCF reviewers and investors, we note the following current architectural constraints:
 
 1. **Audit Hash-Chain Storage**: The hash-chain is currently persisted in a standard database (Postgres) rather than being anchored to a decentralized public ledger or immutable storage network.
-2. **Idempotency State**: Idempotency keys rely on local storage/Redis, which may be volatile depending on the infrastructure configuration.
+2. **Idempotency State**: Idempotency records live in Postgres (`fortexa_submit_idempotency`) with a local JSON-file fallback, so a record can be lost if the process restarts before the file store is written, and claims are per-instance unless all instances share the database.
 3. **Hardware Wallet Integration**: The current wallet-bound login relies on browser extension wallets (like Freighter) and does not yet have direct native integrations with hardware signing devices.

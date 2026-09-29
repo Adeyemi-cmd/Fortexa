@@ -8,10 +8,12 @@ import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { submitSignedTransactionXdr } from "@/lib/stellar/client";
 import {
-  getIdempotencyRecord,
-  hashSignedXdr,
+  abortIdempotentSubmit,
+  beginIdempotentSubmit,
+  completeIdempotentSubmit,
+  getIdempotencyInFlightWaitMs,
+  hashCanonicalPaymentBody,
   maybeRunCleanup,
-  putIdempotencyRecord,
 } from "@/lib/storage/submit-idempotency-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarSubmitSignedRequestSchema } from "@/lib/validation/schemas";
@@ -107,6 +109,10 @@ export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/stellar/submit-signed");
 
+  // Set once this request owns the idempotency key, so a failed submit only ever
+  // releases its own claim.
+  let claimedIdempotency: { userId: string; key: string; requestHash: string } | null = null;
+
   const rate = await consumeRateLimit(request, {
     key: "stellar-submit-signed",
     limit: 30,
@@ -193,24 +199,19 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const xdrHash = idempotencyKey ? hashSignedXdr(payload.signedXdr) : null;
+    // Identity of the request is the hash of the key plus the canonical payment
+    // body, so the store and this route can never disagree about what "the same
+    // request" means.
+    const requestHash = idempotencyKey
+      ? hashCanonicalPaymentBody(idempotencyKey, payload)
+      : null;
 
-    if (idempotencyKey && xdrHash) {
-      const existing = await getIdempotencyRecord(userId, idempotencyKey);
+    if (idempotencyKey && requestHash) {
+      const claim = await beginIdempotentSubmit(userId, idempotencyKey, requestHash, {
+        inFlightWaitMs: getIdempotencyInFlightWaitMs(),
+      });
 
-      if (existing && existing.xdrHash === xdrHash) {
-        logInfo("Signed transaction idempotent replay", { ...context, userId, idempotencyKey });
-        recordStellarSubmitResult("idempotency_replay");
-        return jsonWithRequestContext(request, {
-          route: "/api/stellar/submit-signed",
-          startedAtMs,
-          status: 200,
-          body: existing.result,
-          headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "true" },
-        });
-      }
-
-      if (existing) {
+      if (claim.outcome === "conflict") {
         logWarn("Signed transaction idempotency conflict", { ...context, userId, idempotencyKey });
         recordStellarSubmitResult("idempotency_conflict");
         return jsonWithRequestContext(request, {
@@ -223,6 +224,48 @@ export async function POST(request: NextRequest) {
           headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "false" },
         });
       }
+
+      if (claim.outcome === "in_flight") {
+        logWarn("Signed transaction idempotency in flight", {
+          ...context,
+          userId,
+          idempotencyKey,
+        });
+        recordStellarSubmitResult("idempotency_in_flight");
+        return jsonWithRequestContext(request, {
+          route: "/api/stellar/submit-signed",
+          startedAtMs,
+          status: 409,
+          body: {
+            error: "An identical submit for this idempotency key is still in progress.",
+            code: "idempotency_in_flight",
+          },
+          headers: {
+            ...rateLimitHeaders(rate),
+            "Idempotency-Replayed": "false",
+            "Retry-After": "1",
+          },
+        });
+      }
+
+      if (claim.outcome === "replay") {
+        logInfo("Signed transaction idempotent replay", {
+          ...context,
+          userId,
+          idempotencyKey,
+          transactionHash: claim.record.transactionId,
+        });
+        recordStellarSubmitResult("idempotency_replay");
+        return jsonWithRequestContext(request, {
+          route: "/api/stellar/submit-signed",
+          startedAtMs,
+          status: claim.record.statusCode ?? 200,
+          body: claim.record.result,
+          headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "true" },
+        });
+      }
+
+      claimedIdempotency = { userId, key: idempotencyKey, requestHash };
     }
 
     const submitted = await submitSignedTransactionXdr(payload.signedXdr);
@@ -239,6 +282,7 @@ export async function POST(request: NextRequest) {
     const responseBody = {
       ok: true,
       userId,
+      transactionHash: submitted.hash,
       payment: {
         mode: "real",
         ...submitted,
@@ -246,8 +290,27 @@ export async function POST(request: NextRequest) {
       explorerUrl: getTestnetExplorerUrl(submitted.hash),
     };
 
-    if (idempotencyKey && xdrHash) {
-      await putIdempotencyRecord(userId, idempotencyKey, { xdrHash, result: responseBody });
+    if (claimedIdempotency) {
+      const claim = claimedIdempotency;
+      claimedIdempotency = null;
+
+      try {
+        await completeIdempotentSubmit(userId, claim.key, claim.requestHash, {
+          statusCode: 200,
+          transactionId: submitted.hash,
+          result: responseBody,
+        });
+      } catch (settleError) {
+        // The transaction is already on the ledger, so the claim is deliberately
+        // left in flight instead of being released: releasing it would invite a
+        // retry to resubmit. The lease expiry is what recovers the key.
+        logError("Submit signed idempotency settle failed", {
+          ...context,
+          userId,
+          idempotencyKey: claim.key,
+          detail: settleError instanceof Error ? settleError.message : "unknown",
+        });
+      }
     }
 
     return jsonWithRequestContext(request, {
@@ -261,6 +324,15 @@ export async function POST(request: NextRequest) {
     });
 
 } catch (error) {
+    if (claimedIdempotency) {
+      const claim = claimedIdempotency;
+      claimedIdempotency = null;
+      // Nothing was settled, so free the key and let the client retry.
+      await abortIdempotentSubmit(claim.userId, claim.key, claim.requestHash).catch(
+        () => undefined
+      );
+    }
+
     const formatted = formatSubmitError(error);
     const category = normalizeHorizonError(formatted.txCode);
     logError("Submit signed internal error", {

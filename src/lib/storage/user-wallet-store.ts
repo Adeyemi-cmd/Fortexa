@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 
+import { writeJsonFileAtomic } from "@/lib/storage/atomic-write";
 import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 
@@ -25,7 +26,7 @@ async function ensureStore() {
     await fs.access(storePath);
   } catch {
     const initial: WalletStoreFile = { wallets: {} };
-    await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
+    await writeJsonFileAtomic(storePath, initial);
   }
 }
 
@@ -84,7 +85,7 @@ async function readStore(): Promise<WalletStoreFile> {
 }
 
 async function writeStore(store: WalletStoreFile) {
-  await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf8");
+  await writeJsonFileAtomic(storePath, store);
 }
 
 export async function getUserWallet(userId: string): Promise<UserWallet | { expired: true } | null> {
