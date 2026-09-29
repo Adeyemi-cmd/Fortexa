@@ -8,6 +8,7 @@ import {
   IDEMPOTENCY_KEY_MIN,
   policyConfigSchema,
   stellarBuildPaymentRequestSchema,
+  stellarSubmitSignedRequestSchema,
   validateIdempotencyKey,
 } from "@/lib/validation/schemas";
 
@@ -106,6 +107,15 @@ describe("validation schemas", () => {
 
       expect(parsed.success).toBe(true);
     }
+  });
+
+  it("requires an audit decision reference for signed payment submission", () => {
+    const signedXdr = "A".repeat(20);
+    expect(stellarSubmitSignedRequestSchema.safeParse({ signedXdr }).success).toBe(false);
+    expect(stellarSubmitSignedRequestSchema.safeParse({
+      signedXdr,
+      auditEntryId: "00000000-0000-4000-8000-000000000000",
+    }).success).toBe(true);
   });
 
   it("accepts valid agent plan request", () => {

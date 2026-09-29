@@ -63,9 +63,9 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticat
 |--------|-------|-------------|-----------------|--------|----------------|-------|
 | GET | `/api/stellar/balance` | operator, viewer | 401 | 200 | No | Returns XLM balance for the authenticated user's linked wallet |
 | POST | `/api/stellar/setup` | operator, viewer | 401 | 200 | Yes | Links a Stellar wallet to the current user session |
-| POST | `/api/stellar/build-payment` | operator only | 401 | 403 | No (builds unsigned XDR) | Constructs an unsigned Stellar payment transaction; requires a prior authorized audit entry |
-| POST | `/api/stellar/submit-signed` | operator only | 401 | 403 | Yes | Submits a user-signed XDR to the Stellar network |
-| POST | `/api/stellar/pay` | operator only | 401 | 403 | Yes | **Disabled** — returns 410 Gone |
+| POST | `/api/stellar/build-payment` | signer only | 401 | 403 | No (builds unsigned XDR) | Constructs an unsigned Stellar payment transaction; requires a prior authorized audit entry |
+| POST | `/api/stellar/submit-signed` | signer only | 401 | 403 | Yes | Requires the audit entry ID and a signed native payment matching its unexpired APPROVE/WARN quote |
+| POST | `/api/stellar/pay` | signer only | 401 | 403 | Yes | **Disabled** — direct payment remains unavailable |
 | POST | `/api/stellar/fund` | operator, viewer | 401 | 200 | Yes | **Deprecated** — returns 410 Gone |
 
 ### Agent Routes
@@ -113,4 +113,4 @@ Request
 - `requireAuth()` defaults to `allowedRoles: ["operator", "viewer"]` when no options are passed.
 - Adding a new protected route: call `requireAuth(request, { allowedRoles: [...] })` and add a row to this matrix.
 - The `FORTEXA_AUTH_SECRET` environment variable must be set; without it, no session tokens can be verified.
-- Role assignment is controlled by `FORTEXA_OPERATOR_WALLETS` and `FORTEXA_VIEWER_WALLETS` env vars (comma-separated Stellar public keys).
+- Role assignment is controlled by `FORTEXA_OPERATOR_WALLETS`, `FORTEXA_SIGNER_WALLETS`, and `FORTEXA_VIEWER_WALLETS` (comma-separated Stellar public keys). A wallet may appear in both operator and signer lists to receive both roles.

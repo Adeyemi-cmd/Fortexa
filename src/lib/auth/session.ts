@@ -2,12 +2,13 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { NextRequest } from "next/server";
 
-export type AuthRole = "operator" | "viewer";
+export type AuthRole = "operator" | "signer" | "viewer";
 
 export type AuthSession = {
   userId: string;
   email: string;
   role: AuthRole;
+  roles?: AuthRole[];
   exp: number;
 };
 
@@ -35,12 +36,13 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number }) {
+export function createSessionToken(input: { email: string; role: AuthRole; roles?: AuthRole[]; userId?: string; expiresInSeconds?: number }) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
+    roles: input.roles ?? [input.role],
     exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
   };
 
@@ -81,7 +83,11 @@ export function verifySessionToken(token: string): AuthSession | null {
       return null;
     }
 
-    if (parsed.role !== "operator" && parsed.role !== "viewer") {
+    if (parsed.role !== "operator" && parsed.role !== "signer" && parsed.role !== "viewer") {
+      return null;
+    }
+
+    if (parsed.roles !== undefined && (!Array.isArray(parsed.roles) || parsed.roles.some((role) => role !== "operator" && role !== "signer" && role !== "viewer"))) {
       return null;
     }
 
