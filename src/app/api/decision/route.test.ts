@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { buildSecurityHeaders } from "@/lib/security/headers";
 import { POST } from "@/app/api/decision/route";
 
 function operatorCookie() {
@@ -52,6 +53,9 @@ describe("/api/decision route", () => {
 
       const response = await POST(request);
       expect(response.status).toBe(400);
+      for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+        expect(response.headers.get(key)).toBe(value);
+      }
       const payload = (await response.json()) as { error: string };
       expect(payload.error).toBe("Invalid decision request body.");
     },
@@ -66,6 +70,9 @@ describe("/api/decision route", () => {
 
     const response = await POST(request);
     expect(response.status).toBe(401);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
   });
 
   it("returns 403 for viewer role (operator-only route)", async () => {
@@ -80,6 +87,9 @@ describe("/api/decision route", () => {
 
     const response = await POST(request);
     expect(response.status).toBe(403);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
   });
 
   it("evaluates scenario for operator", async () => {
@@ -94,6 +104,11 @@ describe("/api/decision route", () => {
 
     const response = await POST(request);
     expect(response.status).toBe(200);
+
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
 
     const payload = (await response.json()) as {
       result: { decision: string; riskScore: number };

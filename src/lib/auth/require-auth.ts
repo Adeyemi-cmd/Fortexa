@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getSessionFromRequest, type AuthRole } from "@/lib/auth/session";
+import { applySecurityHeaders } from "@/lib/security/headers";
 
 type RequireAuthOptions = {
   allowedRoles?: AuthRole[];
@@ -11,30 +12,34 @@ export function requireAuth(request: NextRequest, options?: RequireAuthOptions) 
   const requestId = request.headers.get("x-request-id") ?? crypto.randomUUID();
 
   if (!session) {
+    const response = NextResponse.json(
+      { error: "Unauthorized. Login required." },
+      {
+        status: 401,
+        headers: { "x-request-id": requestId },
+      }
+    );
+
     return {
       ok: false as const,
-      response: NextResponse.json(
-        { error: "Unauthorized. Login required." },
-        {
-          status: 401,
-          headers: { "x-request-id": requestId },
-        }
-      ),
+      response: applySecurityHeaders(response, requestId),
     };
   }
 
   const allowedRoles = options?.allowedRoles ?? ["operator", "viewer"];
 
   if (!allowedRoles.includes(session.role)) {
+    const response = NextResponse.json(
+      { error: "Forbidden. Insufficient role permissions." },
+      {
+        status: 403,
+        headers: { "x-request-id": requestId },
+      }
+    );
+
     return {
       ok: false as const,
-      response: NextResponse.json(
-        { error: "Forbidden. Insufficient role permissions." },
-        {
-          status: 403,
-          headers: { "x-request-id": requestId },
-        }
-      ),
+      response: applySecurityHeaders(response, requestId),
     };
   }
 

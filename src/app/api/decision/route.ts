@@ -163,6 +163,8 @@ export async function POST(request: NextRequest) {
         userId,
       },
       headers: rateLimitHeaders(rate),
+      // A decision response is per-user and must never be cached.
+      noStore: true,
     });
   } catch (error) {
     logError("Decision route internal error", {

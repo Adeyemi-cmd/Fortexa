@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { securityHeadersForRequest } from "@/lib/security/headers";
 
 export async function POST(request: NextRequest) {
   const auth = requireAuth(request);
@@ -11,6 +12,6 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json(
     { error: "Friendbot funding has been removed from this project." },
-    { status: 410 }
+    { status: 410, headers: securityHeadersForRequest(request) }
   );
 }
