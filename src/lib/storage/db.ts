@@ -104,6 +104,21 @@ export async function runWithDatabase<T>(
     return { available: false };
   }
 }
+export async function runWithDatabaseNoMigrate<T>(
+  action: (targetPool: Pool) => Promise<T>
+): Promise<DatabaseExecution<T>> {
+  const targetPool = getPool();
+  if (!targetPool) {
+    return { available: false };
+  }
+
+  try {
+    const value = await action(targetPool);
+    return { available: true, value };
+  } catch {
+    return { available: false };
+  }
+}
 
 export async function __resetDatabaseForTests() {
   initPromise = null;
