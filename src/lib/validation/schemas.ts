@@ -69,6 +69,7 @@ const paymentQuoteInputSchema = z.object({
   destination: stellarPublicKeySchema,
   memo: z.string().max(28).optional(),
   network: z.enum(["testnet"]).default("testnet"),
+  asset: z.enum(["native"]).default("native"),
 });
 
 export const decisionRequestSchema = z
@@ -131,6 +132,7 @@ export const policyConfigSchema = z.object({
     start: z.number().int().min(0).max(23),
     end: z.number().int().min(0).max(23),
   }),
+  memoRequiredDestinations: z.array(z.string().min(3).max(56)).default([]),
 });
 
 /**
