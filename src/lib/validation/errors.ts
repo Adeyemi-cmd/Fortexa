@@ -35,10 +35,11 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
   const fieldErrors: Record<string, string[]> = {};
 
   for (const [field, messages] of Object.entries(flattened.fieldErrors)) {
+    const fieldMessages = Array.isArray(messages) ? messages : [];
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = messages ?? [];
+      fieldErrors[field] = fieldMessages;
     }
   }
 
@@ -60,6 +61,6 @@ export function logValidationFailure(
       ...context,
       validation: error.flatten(),
       body: rawBody,
-    }) as LogContext,
+    }) as unknown as LogContext,
   );
 }

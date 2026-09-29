@@ -338,6 +338,7 @@ Stored policy JSON (current state + history) can outlive the active schema. To p
 ### 7.2 Controls present in code
 
 - Per-route rate limiting (`src/lib/security/rate-limit.ts`)
+- Shared enforcement gate for money-movement routes (`src/lib/security/enforcement-gate.ts`): `/api/decision`, `/api/stellar/build-payment`, and `/api/stellar/submit-signed` consume the caller's rate budget atomically (Redis EVAL script or file read-modify-write via shared state) and check the destination — and, on decision, the action domain — against the threat-intel blocklist **before** policy evaluation, XDR construction, or Horizon submission. A destination blocked on one route is blocked on all three. Denials carry stable machine-readable codes: `BLOCKLISTED` (403) and `RATE_LIMITED` (429). Destination/action-domain values never enter metrics labels.
 - Login lockout on repeated failures (`src/lib/auth/login-lockout.ts`)
 - Optional shared file-backed state (`FORTEXA_SHARED_STATE_PATH`) for cross-process limiter/lockout state
 - Role gating (`requireAuth`) for sensitive APIs

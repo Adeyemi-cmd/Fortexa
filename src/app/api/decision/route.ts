@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { evaluateDecision } from "@/lib/decision/engine";
+import { enforceRequestGate, gateErrorHeaders } from "@/lib/security/enforcement-gate";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -12,7 +13,7 @@ import {
 } from "@/lib/observability/logger";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
 import { demoScenarios } from "@/lib/scenarios/seed";
-import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
   appendAuditEntry,
   consumeUsage,
@@ -28,22 +29,51 @@ export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/decision");
 
-  const rate = await consumeRateLimit(request, {
-    key: "decision",
+  // Read the body before consuming the rate budget so the gate can check the
+  // requested destination against the blocklist in the same atomic step.
+  const rawBody = (await request.json().catch(() => ({}))) as unknown;
+
+  const rawDestination =
+    typeof rawBody === "object" && rawBody !== null
+      ? ((rawBody as Record<string, unknown>).destination ??
+        ((rawBody as Record<string, unknown>).paymentQuoteInput as Record<string, unknown> | undefined)
+          ?.destination ??
+        ((rawBody as Record<string, unknown>).paymentQuote as Record<string, unknown> | undefined)
+          ?.destination)
+      : undefined;
+
+  const rawActionDomain =
+    typeof rawBody === "object" && rawBody !== null
+      ? ((rawBody as Record<string, unknown>).action as Record<string, unknown> | undefined)
+        ?.domain
+      : undefined;
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "decision",
     limit: 40,
     windowMs: 60_000,
+    destination: typeof rawDestination === "string" ? rawDestination : undefined,
+    actionDomain: typeof rawActionDomain === "string" ? rawActionDomain : undefined,
   });
 
-  if (!rate.ok) {
-    logWarn("Decision route rate limited", context);
+  if (!gate.ok) {
+    logWarn("Decision route blocked by enforcement gate", {
+      ...context,
+      gateCode: gate.code,
+    });
     return jsonWithRequestContext(request, {
       route: "/api/decision",
       startedAtMs,
-      status: 429,
-      body: { error: "Rate limit exceeded for decision endpoint." },
-      headers: rateLimitHeaders(rate),
+      status: gate.status,
+      body: {
+        error: gate.error,
+        code: gate.code,
+      },
+      headers: gateErrorHeaders(gate),
     });
   }
+
+  const rate = gate.rate;
 
   try {
     const auth = requireAuth(request, { allowedRoles: ["operator"] });
@@ -55,7 +85,6 @@ export async function POST(request: NextRequest) {
 
     const userId = auth.session.userId;
 
-    const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {

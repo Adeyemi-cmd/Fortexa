@@ -3,7 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
-import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { enforceRequestGate, gateErrorHeaders } from "@/lib/security/enforcement-gate";
+import { rateLimitHeaders } from "@/lib/security/rate-limit";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
@@ -12,18 +13,34 @@ import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
-  const rate = await consumeRateLimit(request, {
-    key: "stellar-build-payment",
+  // Read the body first so the gate can blocklist-check the destination in
+  // the same atomic step as the rate-limit consumption (issue #202).
+  const bodyResult = await readJsonBody(request);
+
+  let gateDestination: string | undefined;
+  if (bodyResult.ok) {
+    const preview = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
+    gateDestination = preview.success ? preview.data.destination : undefined;
+  }
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "stellar-build-payment",
     limit: 30,
     windowMs: 60_000,
+    destination: gateDestination,
   });
 
-  if (!rate.ok) {
+  if (!gate.ok) {
     return NextResponse.json(
-      { error: "Rate limit exceeded for payment build endpoint." },
-      { status: 429, headers: rateLimitHeaders(rate) },
+      {
+        error: gate.error,
+        code: gate.code,
+      },
+      { status: gate.status, headers: gateErrorHeaders(gate) },
     );
   }
+
+  const rate = gate.rate;
 
   try {
     const auth = requireAuth(request, { allowedRoles: ["operator"] });
@@ -55,7 +72,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) {
       return NextResponse.json(
         { error: bodyResult.error },

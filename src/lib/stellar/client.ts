@@ -53,6 +53,10 @@ export type SignedXdrSourceResult =
   | { ok: true; sourceAccount: string; isFeeBump: boolean }
   | { ok: false; reason: "malformed" };
 
+export type SignedXdrDestinationResult =
+  | { ok: true; destination: string; isFeeBump: boolean }
+  | { ok: false; reason: "malformed" };
+
 /**
  * Decodes a signed transaction XDR (without submitting it to Horizon) and
  * extracts the transaction-level source account.
@@ -85,6 +89,51 @@ export function decodeSignedXdrSourceAccount(signedXdr: string): SignedXdrSource
   }
 
   return { ok: true, sourceAccount: decoded.source, isFeeBump: false };
+}
+
+/**
+ * Decodes a signed transaction XDR (without submitting it to Horizon) and
+ * extracts the destination of its first payment operation, for enforcement-
+ * gate blocklist checking (issue #202).
+ *
+ * Like the source-account decoder, a fee-bump envelope resolves to the inner
+ * transaction's operations: the outer fee source pays the fee but chose
+ * nothing about the payment destination. Non-payment operations (or no
+ * operations at all) yield `{ ok: true, destination: "" }` — a transaction
+ * that moves no funds has no destination to blocklist.
+ *
+ * Returns `{ ok: false, reason: "malformed" }` instead of throwing so
+ * callers can degrade cleanly.
+ */
+export function decodeSignedXdrDestination(signedXdr: string): SignedXdrDestinationResult {
+  const { networkPassphrase } = assertStellarNetworkConfig();
+
+  let decoded: Transaction | FeeBumpTransaction;
+  try {
+    decoded = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+
+  const operations =
+    decoded instanceof FeeBumpTransaction
+      ? decoded.innerTransaction.operations
+      : decoded.operations;
+  const isFeeBump = decoded instanceof FeeBumpTransaction;
+
+  // The SDK types each operation as a union of xdr.Operation records keyed by
+  // `type`; the payment record carries the destination account id.
+  const payment = operations.find(
+    (op) =>
+      op.type === "payment" &&
+      typeof (op as { destination?: unknown }).destination === "string",
+  ) as { destination?: string } | undefined;
+
+  return {
+    ok: true,
+    destination: payment?.destination ?? "",
+    isFeeBump,
+  };
 }
 
 export async function submitSignedTransactionXdr(signedXdr: string) {
