@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 
 import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
-import { runWithDatabase } from "@/lib/storage/db";
+import { runWithDatabase, runWithDatabaseStrict } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
 
@@ -203,7 +203,7 @@ export async function listAllAuditEntriesByUser(filter?: AuditFilter) {
 }
 
 export async function appendAuditEntry(userId: string, entry: AuditEntry) {
-  const db = await runWithDatabase("appendAuditEntry", async (pool) => {
+  const db = await runWithDatabaseStrict("appendAuditEntry", async (pool) => {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -246,7 +246,7 @@ export async function appendAuditEntry(userId: string, entry: AuditEntry) {
     } finally {
       client.release();
     }
-  }, { throwOnError: true });
+  });
 
   if (db.available) {
     return;
