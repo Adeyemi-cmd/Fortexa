@@ -38,7 +38,7 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = messages ?? [];
+      fieldErrors[field] = Array.isArray(messages) ? messages : [];
     }
   }
 
@@ -60,6 +60,6 @@ export function logValidationFailure(
       ...context,
       validation: error.flatten(),
       body: rawBody,
-    }) as LogContext,
+    }),
   );
 }

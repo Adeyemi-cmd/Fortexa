@@ -82,8 +82,10 @@ function addIssue(
   issues.push({ setting, message, remediation });
 }
 
+type ReadinessEnv = Record<string, string | undefined>;
+
 export function checkProductionReadiness(
-  env: NodeJS.ProcessEnv = process.env,
+  env: ReadinessEnv = process.env,
   options: ProductionReadinessOptions = {}
 ): ProductionReadinessReport {
   const cwd = options.cwd ?? process.cwd();
@@ -220,13 +222,13 @@ export function checkProductionReadiness(
 }
 
 export function shouldEnforceProductionReadiness(
-  env: NodeJS.ProcessEnv = process.env
+  env: ReadinessEnv = process.env
 ) {
   return env.NODE_ENV === "production";
 }
 
 export function getProtectedPaymentFlowReadinessReport(
-  env: NodeJS.ProcessEnv = process.env,
+  env: ReadinessEnv = process.env,
   options: ProductionReadinessOptions = {}
 ) {
   if (!shouldEnforceProductionReadiness(env)) {

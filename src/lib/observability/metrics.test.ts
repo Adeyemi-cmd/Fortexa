@@ -179,11 +179,11 @@ describe("observability metrics", () => {
       recordDecisionOutcome("G" + "A".repeat(55));
       // @ts-expect-error freetext injection
       recordDecisionOutcome("APPROVE; wallet=G123");
-      // @ts-expect-error
+      // @ts-expect-error free-text decision outcome is not an allowlisted label
       recordDecisionOutcome("free-text");
-      // @ts-expect-error
+      // @ts-expect-error free-text stellar result is not an allowlisted label
       recordStellarSubmitResult("wallet_leak_payload");
-      // @ts-expect-error
+      // @ts-expect-error wallet-shaped stellar result is not an allowlisted label
       recordStellarSubmitResult("G12345");
 
       expect(getDecisionOutcomeCounts().size).toBe(0);
@@ -203,9 +203,9 @@ describe("observability metrics", () => {
       recordApiMetric({ route: wallet, method: "POST", statusCode: 200, durationMs: 10 });
       recordApiMetric({ route: `/api/decision?wallet=${wallet}`, method: "POST", statusCode: 200, durationMs: 10 });
       // Also try to inject via outcome/result with wallet-like string (should be dropped)
-      // @ts-expect-error
+      // @ts-expect-error wallet address is not an allowlisted decision outcome
       recordDecisionOutcome(wallet);
-      // @ts-expect-error
+      // @ts-expect-error wallet address is not an allowlisted stellar result
       recordStellarSubmitResult(wallet);
 
       const output = toPrometheusText();
