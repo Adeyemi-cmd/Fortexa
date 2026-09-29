@@ -97,6 +97,38 @@ export async function getIdempotencyRecord(
   return store.records[fileKey(userId, idempotencyKey)] ?? null;
 }
 
+export async function getAllIdempotencyRecords(): Promise<SubmitIdempotencyRecord[]> {
+  const db = await runWithDatabase("getAllIdempotencyRecords", async (pool) => {
+    const result = await pool.query<{
+      user_id: string;
+      idempotency_key: string;
+      xdr_hash: string;
+      result: unknown;
+      created_at: string;
+    }>(
+      `
+        SELECT user_id, idempotency_key, xdr_hash, result, created_at
+        FROM fortexa_submit_idempotency
+      `
+    );
+
+    return result.rows.map((row) => ({
+      userId: row.user_id,
+      idempotencyKey: row.idempotency_key,
+      xdrHash: row.xdr_hash,
+      result: row.result,
+      createdAt: new Date(row.created_at).toISOString(),
+    }));
+  });
+
+  if (db.available) {
+    return db.value;
+  }
+
+  const store = await readStore();
+  return Object.values(store.records);
+}
+
 export async function putIdempotencyRecord(
   userId: string,
   idempotencyKey: string,
