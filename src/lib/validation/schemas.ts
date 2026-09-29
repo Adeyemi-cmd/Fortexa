@@ -43,7 +43,7 @@ const actionKindSchema = z.enum([
 
 const metadataValueSchema = z.union([z.string(), z.number(), z.boolean()]);
 
-export const agentActionSchema = z.object({
+const agentActionShape = {
   id: z.string().min(1).max(120),
   name: z.string().min(3).max(200),
   kind: actionKindSchema,
@@ -57,7 +57,15 @@ export const agentActionSchema = z.object({
   tool: z.string().min(1).max(120).optional(),
   outputPreview: z.string().min(1).max(2000).optional(),
   metadata: z.record(z.string(), metadataValueSchema).optional(),
-});
+};
+
+export const agentActionSchema = z.object(agentActionShape);
+
+/**
+ * Strict variant of the action schema used for untrusted model output: unknown
+ * keys are rejected instead of silently stripped.
+ */
+const strictAgentActionSchema = z.strictObject(agentActionShape);
 
 const stellarPublicKeySchema = z
   .string()
@@ -118,6 +126,19 @@ export const agentPlanRequestSchema = z.object({
   destinationHint: z.string().startsWith("G").min(56).max(56).optional(),
 });
 
+/**
+ * Strict schema for raw planner output.
+ *
+ * Model output must match this shape exactly before anything is stored or
+ * evaluated: unknown keys are rejected and no coercion/casting is performed.
+ * Any drift from the schema means the payload is ignored entirely instead of
+ * partially influencing an agent plan.
+ */
+export const agentPlanSchema = z.strictObject({
+  id: z.string().min(1).max(120),
+  action: strictAgentActionSchema,
+});
+
 export const policyConfigSchema = z.object({
   allowedDomains: z.array(z.string().min(3)).min(1),
   blockedDomains: z.array(z.string().min(3)).min(1),
@@ -162,6 +183,7 @@ export const policySimulateRequestSchema = z.object({
 });
 
 export type AgentActionInput = z.infer<typeof agentActionSchema>;
+export type AgentPlanInput = z.infer<typeof agentPlanSchema>;
 export type DecisionRequestInput = z.infer<typeof decisionRequestSchema>;
 export type AgentPlanRequestInput = z.infer<typeof agentPlanRequestSchema>;
 export type PolicySimulateRequestInput = z.infer<typeof policySimulateRequestSchema>;

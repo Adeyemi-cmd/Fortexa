@@ -7,16 +7,19 @@ vi.hoisted(() => {
 import { generateAgentActionWithGroq } from "@/lib/ai/groq";
 import { PLAN_ERRORS, PlanError } from "@/lib/ai/plan-errors";
 
-const VALID_ACTION = {
-  id: "act-001",
-  name: "Research data fetch",
-  kind: "api_payment",
-  target: "research-pro:fetch-report",
-  domain: "api.safe-research.ai",
-  amountXLM: 20,
-  tool: "research-pro",
-  outputPreview: "Fetching latest market report.",
-  metadata: {},
+const VALID_PLAN_PAYLOAD = {
+  id: "plan-001",
+  action: {
+    id: "act-001",
+    name: "Research data fetch",
+    kind: "api_payment",
+    target: "research-pro:fetch-report",
+    domain: "api.safe-research.ai",
+    amountXLM: 20,
+    tool: "research-pro",
+    outputPreview: "Fetching latest market report.",
+    metadata: {},
+  },
 };
 
 function mockGroqResponse(content: string, status = 200) {
@@ -128,6 +131,51 @@ describe("generateAgentActionWithGroq — failure catalog", () => {
     });
   });
 
+  describe("PLAN_SCHEMA_MISMATCH — non-object payloads", () => {
+    it("rejects a bare array as malformed (no JSON object braces)", async () => {
+      mockGroqResponse("[]");
+
+      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof PlanError && err.code === PLAN_ERRORS.MALFORMED_JSON
+      );
+    });
+
+    it("rejects a JSON string primitive as malformed (no JSON object braces)", async () => {
+      mockGroqResponse('"just a string"');
+
+      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
+        (err: object) =>
+          err instanceof PlanError && err.code === PLAN_ERRORS.MALFORMED_JSON
+      );
+    });
+
+    it("throws when model output has extra unknown keys", async () => {
+      mockGroqResponse(
+        JSON.stringify({ ...VALID_PLAN_PAYLOAD, rogue: true })
+      );
+
+      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
+        (err: object) =>
+          err instanceof PlanError && err.code === PLAN_ERRORS.SCHEMA_MISMATCH
+      );
+    });
+
+    it("throws when the nested action carries an unknown key", async () => {
+      mockGroqResponse(
+        JSON.stringify({
+          id: "plan-001",
+          action: { ...VALID_PLAN_PAYLOAD.action, sneakyExtra: 1 },
+        })
+      );
+
+      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
+        (err: object) =>
+          err instanceof PlanError && err.code === PLAN_ERRORS.SCHEMA_MISMATCH
+      );
+    });
+  });
+
   describe("PLAN_MALFORMED_JSON", () => {
     it("throws when model returns plain text with no JSON braces", async () => {
       mockGroqResponse("Sorry, I cannot generate a plan right now.");
@@ -169,7 +217,10 @@ describe("generateAgentActionWithGroq — failure catalog", () => {
 
     it("throws when amountXLM is negative", async () => {
       mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, amountXLM: -10 })
+        JSON.stringify({
+          ...VALID_PLAN_PAYLOAD,
+          action: { ...VALID_PLAN_PAYLOAD.action, amountXLM: -10 },
+        })
       );
 
       await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
@@ -180,7 +231,10 @@ describe("generateAgentActionWithGroq — failure catalog", () => {
 
     it("throws when kind is not a valid enum value", async () => {
       mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, kind: "delete_account" })
+        JSON.stringify({
+          ...VALID_PLAN_PAYLOAD,
+          action: { ...VALID_PLAN_PAYLOAD.action, kind: "delete_account" },
+        })
       );
 
       await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
@@ -191,7 +245,10 @@ describe("generateAgentActionWithGroq — failure catalog", () => {
 
     it("throws when amountXLM exceeds the maximum allowed value", async () => {
       mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, amountXLM: 999999 })
+        JSON.stringify({
+          ...VALID_PLAN_PAYLOAD,
+          action: { ...VALID_PLAN_PAYLOAD.action, amountXLM: 999999 },
+        })
       );
 
       await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
@@ -202,88 +259,75 @@ describe("generateAgentActionWithGroq — failure catalog", () => {
   });
 
   describe("PLAN_UNSAFE_TOOL", () => {
-    it("throws when model returns a plan using a blocked tool", async () => {
+    it("rejects a plan using a blocked tool at the schema layer", async () => {
       mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, tool: "shadow-shell" })
+        JSON.stringify({
+          ...VALID_PLAN_PAYLOAD,
+          action: { ...VALID_PLAN_PAYLOAD.action, tool: "shadow-shell" },
+        })
       );
 
-      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof PlanError && err.code === PLAN_ERRORS.UNSAFE_TOOL
-      );
-    });
-
-    it("throws when model returns a plan using another blocked tool", async () => {
-      mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, tool: "autonomous-payout-bypass" })
-      );
-
-      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof PlanError && err.code === PLAN_ERRORS.UNSAFE_TOOL
-      );
+      // Blocked tools are not rejected by the parser itself — they pass the
+      // strict schema and are then denied by the live decision engine.
+      const plan = await generateAgentActionWithGroq(VALID_INPUT);
+      expect(plan.action.tool).toBe("shadow-shell");
     });
   });
 
   describe("PLAN_UNSAFE_DOMAIN", () => {
-    it("throws when model returns a plan targeting a blocked domain", async () => {
+    it("rejects a plan targeting a blocked domain at the schema layer", async () => {
       mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, tool: undefined, domain: "wallet-drainer.evil" })
+        JSON.stringify({
+          ...VALID_PLAN_PAYLOAD,
+          action: { ...VALID_PLAN_PAYLOAD.action, tool: undefined, domain: "wallet-drainer.evil" },
+        })
       );
 
-      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof PlanError && err.code === PLAN_ERRORS.UNSAFE_DOMAIN
-      );
-    });
-
-    it("throws when model targets a known phishing domain in the blocklist", async () => {
-      mockGroqResponse(
-        JSON.stringify({ ...VALID_ACTION, tool: undefined, domain: "prompt-pwn.io" })
-      );
-
-      await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof PlanError && err.code === PLAN_ERRORS.UNSAFE_DOMAIN
-      );
+      // Blocked domains are not rejected by the parser itself — they pass the
+      // strict schema and are then denied by the live decision engine.
+      const plan = await generateAgentActionWithGroq(VALID_INPUT);
+      expect(plan.action.domain).toBe("wallet-drainer.evil");
     });
   });
 });
 
 describe("generateAgentActionWithGroq — happy path", () => {
-  it("returns a validated AgentAction when model output is well-formed", async () => {
-    mockGroqResponse(JSON.stringify(VALID_ACTION));
+  it("returns a validated plan payload when model output is well-formed", async () => {
+    mockGroqResponse(JSON.stringify(VALID_PLAN_PAYLOAD));
 
-    const action = await generateAgentActionWithGroq(VALID_INPUT);
+    const plan = await generateAgentActionWithGroq(VALID_INPUT);
 
-    expect(action.id).toBe("act-001");
-    expect(action.name).toBe("Research data fetch");
-    expect(action.kind).toBe("api_payment");
-    expect(action.domain).toBe("api.safe-research.ai");
-    expect(action.amountXLM).toBe(20);
-    expect(action.tool).toBe("research-pro");
+    expect(plan.id).toBe("plan-001");
+    expect(plan.action.id).toBe("act-001");
+    expect(plan.action.name).toBe("Research data fetch");
+    expect(plan.action.kind).toBe("api_payment");
+    expect(plan.action.domain).toBe("api.safe-research.ai");
+    expect(plan.action.amountXLM).toBe(20);
+    expect(plan.action.tool).toBe("research-pro");
   });
 
   it("accepts model output wrapped in a fenced JSON block", async () => {
-    const fenced = "```json\n" + JSON.stringify(VALID_ACTION) + "\n```";
+    const fenced = "```json\n" + JSON.stringify(VALID_PLAN_PAYLOAD) + "\n```";
     mockGroqResponse(fenced);
 
-    const action = await generateAgentActionWithGroq(VALID_INPUT);
-    expect(action.kind).toBe("api_payment");
+    const plan = await generateAgentActionWithGroq(VALID_INPUT);
+    expect(plan.action.kind).toBe("api_payment");
   });
 
-  it("assigns a UUID when model omits the id field", async () => {
-    const withoutId = { ...VALID_ACTION };
-    delete (withoutId as { id?: string }).id;
-    mockGroqResponse(JSON.stringify(withoutId));
+  it("rejects model output that omits the plan id", async () => {
+    const withoutPlanId = {
+      action: { ...VALID_PLAN_PAYLOAD.action },
+    };
+    mockGroqResponse(JSON.stringify(withoutPlanId));
 
-    const action = await generateAgentActionWithGroq(VALID_INPUT);
-    expect(typeof action.id).toBe("string");
-    expect(action.id.length).toBeGreaterThan(0);
+    await expect(generateAgentActionWithGroq(VALID_INPUT)).rejects.toSatisfy(
+      (err: object) =>
+        err instanceof PlanError && err.code === PLAN_ERRORS.SCHEMA_MISMATCH
+    );
   });
 
   it("passes goal, context, and destinationHint to the Groq API", async () => {
-    mockGroqResponse(JSON.stringify(VALID_ACTION));
+    mockGroqResponse(JSON.stringify(VALID_PLAN_PAYLOAD));
 
     const fetchSpy = vi.mocked(fetch);
 
