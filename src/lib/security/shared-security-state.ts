@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import Redis from "ioredis";
 
@@ -266,6 +266,41 @@ export async function readSharedChallenge(key: string): Promise<SharedChallengeS
       return JSON.parse(raw) as SharedChallengeState;
     },
     () => readSharedState().challenges[key]
+  );
+}
+
+/** Atomically remove a challenge before its signature is checked. */
+export async function takeSharedChallenge(key: string): Promise<SharedChallengeState | undefined> {
+  return runWithRedisFallback(
+    async (client) => {
+      const raw = await client.getdel(`fortexa:challenge:${key}`);
+      return raw ? JSON.parse(raw) as SharedChallengeState : undefined;
+    },
+    () => {
+      const filePath = getSharedStatePath();
+      if (!filePath) return undefined;
+
+      // A per-challenge claim serializes attempts across processes using the file store.
+      const claimPath = `${filePath}.challenge-${key}.claim`;
+      try {
+        closeSync(openSync(claimPath, "wx"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
+        throw error;
+      }
+
+      try {
+        const current = readSharedState();
+        const challenge = current.challenges[key];
+        if (challenge) {
+          delete current.challenges[key];
+          writeSharedState(current);
+        }
+        return challenge;
+      } finally {
+        rmSync(claimPath, { force: true });
+      }
+    }
   );
 }
 
