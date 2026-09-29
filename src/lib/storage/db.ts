@@ -122,8 +122,7 @@ export async function getDatabaseMigrationStatus() {
 
 export async function runWithDatabase<T>(
   operationName: string,
-  action: (targetPool: Pool) => Promise<T>,
-  options: { throwOnError?: boolean } = {}
+  action: (targetPool: Pool) => Promise<T>
 ): Promise<DatabaseExecution<T>> {
   const targetPool = getPool();
   if (!targetPool) {
@@ -140,16 +139,34 @@ export async function runWithDatabase<T>(
     const value = await action(targetPool);
     return { available: true, value };
   } catch (error) {
-    if (options.throwOnError) {
-      throw error;
-    }
-
     logWarn("Database operation failed, falling back to file store", {
       operationName,
       detail: error instanceof Error ? error.message : "unknown",
     });
 
     return { available: false };
+  }
+}
+
+export async function runWithDatabaseStrict<T>(
+  operationName: string,
+  action: (targetPool: Pool) => Promise<T>
+): Promise<DatabaseExecution<T>> {
+  const targetPool = getPool();
+  if (!targetPool) {
+    return { available: false };
+  }
+
+  try {
+    await ensureSchema(targetPool);
+    const value = await action(targetPool);
+    return { available: true, value };
+  } catch (error) {
+    logWarn("Strict database operation failed", {
+      operationName,
+      detail: error instanceof Error ? error.message : "unknown",
+    });
+    throw error;
   }
 }
 

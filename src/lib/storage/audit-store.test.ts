@@ -14,6 +14,7 @@ const { runWithDatabaseMock } = vi.hoisted(() => ({
 
 vi.mock("@/lib/storage/db", () => ({
   runWithDatabase: runWithDatabaseMock,
+  runWithDatabaseStrict: runWithDatabaseMock,
 }));
 
 import { computeEntryHash, GENESIS_HASH, verifyHashChain } from "@/lib/audit/hash-chain";
@@ -100,12 +101,11 @@ describe("audit-store append serialization", () => {
       release: vi.fn(),
     };
     const pool = { connect: vi.fn(async () => client) };
-    runWithDatabaseMock.mockImplementationOnce(async (_name, action, options) => {
+    runWithDatabaseMock.mockImplementationOnce(async (_name, action) => {
       try {
         return { available: true as const, value: await action(pool as never) };
       } catch (error) {
-        if (options?.throwOnError) throw error;
-        return { available: false as const };
+        throw error;
       }
     });
 
