@@ -112,6 +112,7 @@ export interface PaymentQuote {
   asset: StellarAssetId;
   memo: string;
   network: StellarNetworkId;
+  receiptHash?: string;
 }
 
 export interface AuditEntry {
