@@ -7,6 +7,7 @@ import {
   scenarioCases,
   simulatePolicyRollback,
 } from "@/lib/decision/simulate";
+import { collectRollbackConflicts } from "@/lib/decision/rollback-conflicts";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
@@ -48,7 +49,7 @@ export async function POST(request: NextRequest) {
     const parsed = policyRollbackPreviewSchema.safeParse(rawBody);
 
     if (!parsed.success) {
-      logValidationFailure("Policy rollback preview validation failed", { ...context, userId }, parsed.error, bodyResult.data);
+      logValidationFailure("Policy rollback preview validation failed", { ...context, userId }, parsed.error, rawBody);
       return jsonWithRequestContext(request, {
         route: "/api/policy/rollback/preview",
         startedAtMs,
@@ -80,6 +81,8 @@ export async function POST(request: NextRequest) {
       usage,
     });
 
+    const conflicts = await collectRollbackConflicts(targetEntry.policy);
+
     logInfo("Policy rollback preview evaluated", {
       ...context,
       userId,
@@ -87,6 +90,7 @@ export async function POST(request: NextRequest) {
       currentVersion,
       changed: report.summary.changed,
       auditSampled,
+      conflicts: conflicts.length,
     });
 
     return jsonWithRequestContext(request, {
@@ -98,6 +102,7 @@ export async function POST(request: NextRequest) {
         targetVersion,
         currentVersion,
         auditSampled,
+        conflicts,
       },
       headers: rateLimitHeaders(rate),
     });
