@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["operator", "signer"] });
 
     if (!auth.ok) {
       logWarn("Decision route unauthorized", context);

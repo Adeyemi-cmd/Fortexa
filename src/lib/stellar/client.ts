@@ -50,7 +50,12 @@ export async function buildUnsignedPaymentTransaction(request: StellarPaymentReq
 }
 
 export type SignedXdrSourceResult =
-  | { ok: true; sourceAccount: string; isFeeBump: boolean }
+  | {
+      ok: true;
+      sourceAccount: string;
+      isFeeBump: boolean;
+      payment: { destination: string; amountXLM: string; asset: "native"; memo?: string } | null;
+    }
   | { ok: false; reason: "malformed" };
 
 /**
@@ -77,14 +82,30 @@ export function decodeSignedXdrSourceAccount(signedXdr: string): SignedXdrSource
   }
 
   if (decoded instanceof FeeBumpTransaction) {
-    return {
-      ok: true,
-      sourceAccount: decoded.innerTransaction.source,
-      isFeeBump: true,
-    };
+    decoded = decoded.innerTransaction;
   }
 
-  return { ok: true, sourceAccount: decoded.source, isFeeBump: false };
+  const operation = decoded.operations.length === 1 ? decoded.operations[0] : undefined;
+  const memoValue = decoded.memo.type === "text" ? decoded.memo.value : undefined;
+  const payment = operation?.type === "payment" && operation.asset.isNative()
+    ? {
+        destination: operation.destination,
+        amountXLM: operation.amount,
+        asset: "native" as const,
+        memo: memoValue === undefined
+          ? undefined
+          : typeof memoValue === "string"
+            ? memoValue
+            : memoValue.toString("utf8"),
+      }
+    : null;
+
+  return {
+    ok: true,
+    sourceAccount: decoded.source,
+    isFeeBump: false,
+    payment,
+  };
 }
 
 export async function submitSignedTransactionXdr(signedXdr: string) {

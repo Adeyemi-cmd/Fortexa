@@ -4,7 +4,7 @@ import { z } from "zod";
 import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from "@/lib/auth/login-lockout";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { verifyWalletChallenge } from "@/lib/auth/wallet-challenge";
-import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet-role";
+import { normalizeWalletPublicKey, resolveRolesByWallet } from "@/lib/auth/wallet-role";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
@@ -121,9 +121,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const role = resolveRoleByWallet(normalizedWallet);
+    const roles = resolveRolesByWallet(normalizedWallet);
 
-    if (!role) {
+    if (roles.length === 0) {
       const failure = await registerLoginFailure(normalizedWallet, clientIp);
       logWarn("Auth login unknown wallet", { ...context, wallet: normalizedWallet });
       return jsonWithRequestContext(request, {
@@ -149,7 +149,8 @@ export async function POST(request: NextRequest) {
 
     const token = createSessionToken({
       email: `wallet:${normalizedWallet}`,
-      role,
+      role: roles.includes("operator") ? "operator" : roles[0],
+      roles,
       userId,
     });
 
@@ -159,7 +160,8 @@ export async function POST(request: NextRequest) {
       status: 200,
       body: {
         ok: true,
-        role,
+        role: roles.includes("operator") ? "operator" : roles[0],
+        roles,
         wallet: normalizedWallet,
       },
       headers: rateLimitHeaders(rate),
