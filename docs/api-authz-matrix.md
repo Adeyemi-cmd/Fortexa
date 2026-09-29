@@ -11,7 +11,7 @@ Fortexa uses two roles:
 | **operator** | Full access — can read and write policy, trigger decisions, build and submit Stellar transactions |
 | **viewer** | Read-only access — can read policy and audit entries, but cannot modify state |
 
-Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticated requests (no valid cookie) receive **401 Unauthorized**. Authenticated requests with an insufficient role receive **403 Forbidden**.
+Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`) carrying a generation counter that is checked against the server-side session store. Unauthenticated requests (no valid cookie) receive **401 Unauthorized**. Authenticated requests with an insufficient role receive **403 Forbidden**.
 
 ---
 
@@ -23,8 +23,8 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticat
 |--------|-------|-------------|-----------------|--------|----------------|-------|
 | GET | `/api/auth/challenge` | Public | 200 (challenge issued) | 200 | No | Issues a SEP-53 wallet challenge; rate-limited |
 | POST | `/api/auth/login` | Public | 200 (sets session cookie) | 200 | Yes | Verifies wallet signature; sets `fortexa_session` cookie |
-| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Clears the session cookie; no auth check |
-| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid session; extends token TTL |
+| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Clears the session cookie and revokes every generation of the presented session; no auth check |
+| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid session; rotates the cookie generation, so the previous cookie is rejected on the next request |
 | GET | `/api/auth/session` | Public | 200 (no session body) | 200 | No | Returns session metadata if cookie is valid; safe to call unauthenticated |
 
 ### Health & Metrics Routes

@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 
 import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from "@/lib/auth/login-lockout";
-import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { startSession } from "@/lib/auth/session";
+import { setSessionCookie } from "@/lib/auth/session-cookie";
 import { verifyWalletChallenge } from "@/lib/auth/wallet-challenge";
 import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet-role";
 import { jsonWithRequestContext } from "@/lib/observability/http";
@@ -147,7 +148,7 @@ export async function POST(request: NextRequest) {
       provider: "login",
     });
 
-    const token = createSessionToken({
+    const session = startSession({
       email: `wallet:${normalizedWallet}`,
       role,
       userId,
@@ -165,13 +166,7 @@ export async function POST(request: NextRequest) {
       headers: rateLimitHeaders(rate),
     });
 
-    response.cookies.set(AUTH_COOKIE_KEY, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(response, session.token);
 
     await clearLoginFailures(normalizedWallet, clientIp);
 
