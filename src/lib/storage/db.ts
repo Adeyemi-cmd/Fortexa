@@ -122,7 +122,8 @@ export async function getDatabaseMigrationStatus() {
 
 export async function runWithDatabase<T>(
   operationName: string,
-  action: (targetPool: Pool) => Promise<T>
+  action: (targetPool: Pool) => Promise<T>,
+  options: { throwOnError?: boolean } = {}
 ): Promise<DatabaseExecution<T>> {
   const targetPool = getPool();
   if (!targetPool) {
@@ -139,6 +140,10 @@ export async function runWithDatabase<T>(
     const value = await action(targetPool);
     return { available: true, value };
   } catch (error) {
+    if (options.throwOnError) {
+      throw error;
+    }
+
     logWarn("Database operation failed, falling back to file store", {
       operationName,
       detail: error instanceof Error ? error.message : "unknown",
