@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { useAuthSession } from "@/lib/auth/use-auth-session";
 import type { SimulationReport, SimulationSource } from "@/lib/decision/simulate";
 import type { DecisionType, PolicyConfig } from "@/lib/types/domain";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
 import { PolicyImportExport } from "@/components/policy-import-export";
 
 type PolicyResponse = {
@@ -17,6 +18,7 @@ type PolicyResponse = {
   updatedAt?: string | null;
   version?: number;
   error?: string;
+  code?: string;
 };
 
 type PolicyConflictResponse = {
@@ -71,7 +73,13 @@ function textToList(text: string) {
     .filter(Boolean);
 }
 
-export function PolicyEditor() {
+export function PolicyEditor({
+  networkMatches,
+  networkFingerprint,
+}: {
+  networkMatches: boolean;
+  networkFingerprint: string;
+}) {
   const { isOperator, loading: sessionLoading } = useAuthSession();
   const [policy, setPolicy] = useState<PolicyConfig | null>(null);
   const [allowedDomains, setAllowedDomains] = useState("");
@@ -94,8 +102,12 @@ export function PolicyEditor() {
   const [rollbackPreview, setRollbackPreview] = useState<SimulationReport | null>(null);
   const [rollbackPreviewStatus, setRollbackPreviewStatus] = useState<string | null>(null);
   const [previewingRollback, setPreviewingRollback] = useState(false);
+  const [serverNetworkMatches, setServerNetworkMatches] = useState<boolean | null>(null);
 
+  const sensitivePayload = hasSensitiveField(policy);
+  const networkMismatch = !networkMatches || serverNetworkMatches === false;
   const writeDisabled = loading || sessionLoading || !isOperator;
+  const saveDisabled = writeDisabled || serverNetworkMatches !== true || networkMismatch || sensitivePayload;
 
   /** Assemble the unsaved draft policy from the current editor state. */
   function buildDraftPolicy(base: PolicyConfig): PolicyConfig {
@@ -178,6 +190,10 @@ export function PolicyEditor() {
   }
 
   async function savePolicy() {
+    if (networkMismatch || serverNetworkMatches !== true || hasSensitiveField(policy)) {
+      setStatus("Saving is disabled because the network differs or the policy contains a sensitive field.");
+      return;
+    }
     if (!isOperator) {
       setStatus("Viewer role is read-only. Login as operator to update policy.");
       return;
@@ -201,12 +217,20 @@ export function PolicyEditor() {
 
       const response = await fetch("/api/policy", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Fortexa-Network-Fingerprint": networkFingerprint,
+        },
         body,
       });
 
       if (response.status === 409) {
         const conflictBody = (await response.json().catch(() => ({}))) as PolicyConflictResponse;
+        if (conflictBody.code === "NETWORK_MISMATCH") {
+          setServerNetworkMatches(false);
+          setStatus(conflictBody.error ?? "Server network changed. Saving is disabled.");
+          return;
+        }
         const expectedVersion =
           conflictBody.expectedVersion ?? version ?? -1;
         const currentVersion = conflictBody.currentVersion ?? -1;
@@ -358,6 +382,10 @@ export function PolicyEditor() {
   }
 
   async function confirmRollback(versionToRollback: number) {
+    if (saveDisabled) {
+      setStatus("Saving is disabled until the server network matches this page.");
+      return;
+    }
     if (!isOperator) {
       setStatus("Viewer role is read-only. Login as operator to rollback policy.");
       return;
@@ -374,11 +402,15 @@ export function PolicyEditor() {
     try {
       const response = await fetch("/api/policy/rollback", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Fortexa-Network-Fingerprint": networkFingerprint,
+        },
         body: JSON.stringify({ targetVersion: versionToRollback }),
       });
 
       const payload = (await response.json()) as PolicyResponse;
+      if (payload.code === "NETWORK_MISMATCH") setServerNetworkMatches(false);
 
       if (!response.ok || payload.error || !payload.policy) {
         setStatus(payload.error ?? "Rollback failed.");
@@ -405,6 +437,10 @@ export function PolicyEditor() {
   }
 
   async function handleImportPolicy(importedPolicy: PolicyConfig) {
+    if (networkMismatch || serverNetworkMatches !== true || hasSensitiveField(importedPolicy)) {
+      setStatus("Import is disabled because the network differs or the policy contains a sensitive field.");
+      return;
+    }
     if (!isOperator) {
       setStatus("Viewer role is read-only. Login as operator to import policy.");
       return;
@@ -414,11 +450,16 @@ export function PolicyEditor() {
     try {
       const response = await fetch("/api/policy", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Fortexa-Network-Fingerprint": networkFingerprint,
+        },
         body: JSON.stringify(importedPolicy),
       });
 
       const payload = (await response.json()) as PolicyResponse;
+
+      if (payload.code === "NETWORK_MISMATCH") setServerNetworkMatches(false);
 
       if (!response.ok || payload.error || !payload.policy) {
         setStatus(payload.error ?? "Failed to save imported policy.");
@@ -442,6 +483,22 @@ export function PolicyEditor() {
   }
 
   useEffect(() => {
+    let active = true;
+    void fetch("/api/stellar/network-config", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Network check failed");
+        return (await response.json()) as { fingerprint?: string; valid?: boolean };
+      })
+      .then((current) => {
+        if (active) setServerNetworkMatches(current.valid === true && current.fingerprint === networkFingerprint);
+      })
+      .catch(() => {
+        if (active) setServerNetworkMatches(false);
+      });
+    return () => { active = false; };
+  }, [networkFingerprint]);
+
+  useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
     void loadPolicy();
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -450,6 +507,16 @@ export function PolicyEditor() {
 
   return (
     <div className="space-y-6">
+      {networkMismatch || sensitivePayload ? (
+        <Alert className="border-red-500/40 bg-red-500/10" role="alert">
+          <AlertTitle>Saving disabled</AlertTitle>
+          <AlertDescription>
+            {networkMismatch
+              ? "The displayed network differs from the server configuration."
+              : "The policy contains a sensitive field."}
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {!sessionLoading && !isOperator ? (
         <Alert className="border-amber-500/40 bg-amber-500/10">
           <AlertTitle>Viewer mode</AlertTitle>
@@ -573,7 +640,7 @@ export function PolicyEditor() {
           currentPolicy={policy}
           onImportApproved={handleImportPolicy}
           isOperator={isOperator}
-          isLoading={loading || sessionLoading}
+          isLoading={saveDisabled}
         />
 
       <Card>
@@ -685,7 +752,7 @@ export function PolicyEditor() {
               <Button
                 variant="danger"
                 size="sm"
-                disabled={writeDisabled || loading}
+                disabled={saveDisabled}
                 onClick={() => confirmRollback(rollbackPreviewVersion)}
               >
                 Confirm rollback to v{rollbackPreviewVersion}
@@ -735,7 +802,7 @@ export function PolicyEditor() {
       </Card>
 
       <div className="flex gap-2">
-        <Button onClick={savePolicy} disabled={writeDisabled}>Save Policy</Button>
+        <Button onClick={savePolicy} disabled={saveDisabled}>Save Policy</Button>
         <Button variant="outline" onClick={loadPolicy} disabled={loading}>Reload</Button>
         <Button variant="outline" onClick={loadHistory} disabled={loading}>Reload History</Button>
       </div>

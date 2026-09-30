@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import type { PolicyConfig } from "@/lib/types/domain";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { generatePolicyDiff, groupDiffChanges } from "@/lib/validation/diff";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
 
 interface PolicyImportExportProps {
   currentPolicy: PolicyConfig | null;
@@ -75,6 +76,11 @@ export function PolicyImportExport({
             status: "error",
             error: `Invalid JSON: ${err instanceof Error ? err.message : "Unknown parse error"}`,
           });
+          return;
+        }
+
+        if (hasSensitiveField(parsed)) {
+          setImportState({ status: "error", error: "Policy contains a sensitive field and cannot be saved." });
           return;
         }
 

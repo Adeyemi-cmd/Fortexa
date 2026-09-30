@@ -11,6 +11,8 @@ import { DuplicateRuleError } from "@/lib/policy/engine";
 import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
+import { getStellarNetworkFingerprint, resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -88,6 +90,33 @@ export async function POST(request: NextRequest) {
         startedAtMs,
         status: 413,
         body: { error: bodyResult.error },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (hasSensitiveField(bodyResult.data)) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Policy payload contains a sensitive field." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const expectedNetwork = request.headers.get("x-fortexa-network-fingerprint");
+    if (
+      !resolveStellarNetworkConfig().ok ||
+      (expectedNetwork !== null && expectedNetwork !== getStellarNetworkFingerprint())
+    ) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 409,
+        body: {
+          error: "Server network configuration is mismatched; saving is disabled.",
+          code: "NETWORK_MISMATCH",
+        },
         headers: rateLimitHeaders(rate),
       });
     }

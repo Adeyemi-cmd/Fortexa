@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
+import { Networks } from "@stellar/stellar-sdk";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { DEFAULT_JSON_BODY_MAX_BYTES } from "@/lib/http/read-json-body";
+import { getStellarNetworkFingerprint } from "@/lib/stellar/network-config";
 import { GET, POST } from "@/app/api/policy/route";
 
 function operatorCookie() {
@@ -60,6 +62,59 @@ const POLICY_PAYLOAD = {
 };
 
 describe("/api/policy route", () => {
+  it("rejects secret-shaped payload fields before saving", async () => {
+    const response = await POST(makePolicyPostRequest(operatorCookie(), {
+      ...POLICY_PAYLOAD,
+      auth: { sessionToken: "fixture-token" },
+    }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("sensitive field");
+  });
+
+  it("rejects saves when the server Horizon and passphrase disagree", async () => {
+    const previousHorizon = process.env.STELLAR_HORIZON_URL;
+    const previousPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+    try {
+      const response = await POST(makePolicyPostRequest(operatorCookie(), POLICY_PAYLOAD));
+      expect(response.status).toBe(409);
+    } finally {
+      if (previousHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
+      else process.env.STELLAR_HORIZON_URL = previousHorizon;
+      if (previousPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = previousPassphrase;
+    }
+  });
+
+  it("rejects a stale settings page after the server network changes", async () => {
+    const previousHorizon = process.env.STELLAR_HORIZON_URL;
+    const previousPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+    process.env.STELLAR_HORIZON_URL = "https://horizon-testnet.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+    const displayedFingerprint = getStellarNetworkFingerprint();
+    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.PUBLIC;
+    try {
+      const response = await POST(new NextRequest("http://localhost/api/policy", {
+        method: "POST",
+        headers: {
+          cookie: operatorCookie(),
+          "content-type": "application/json",
+          "x-fortexa-network-fingerprint": displayedFingerprint,
+        },
+        body: JSON.stringify(POLICY_PAYLOAD),
+      }));
+      expect(response.status).toBe(409);
+    } finally {
+      if (previousHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
+      else process.env.STELLAR_HORIZON_URL = previousHorizon;
+      if (previousPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = previousPassphrase;
+    }
+  });
+
   it("returns 401 when unauthenticated", async () => {
     const request = new NextRequest("http://localhost/api/policy", { method: "GET" });
     const response = await GET(request);
