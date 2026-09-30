@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
@@ -27,7 +28,15 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
-
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/pay",
+      Date.now(),
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      return notReady;
+    }
     const rawPayload = (await request.json().catch(() => ({}))) as unknown;
     const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(rawPayload);
 
