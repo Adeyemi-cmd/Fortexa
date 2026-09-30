@@ -191,25 +191,16 @@ async function fetchBlocklistWithTimeout(): Promise<{
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "AbortError";
     const health = getBlocklistHealth();
-    return { blocklist: [], status: { blocked: true, timedOut: isTimeout || /abort|timeout/i.test(health.lastError || ""), error: health.lastError || "Blocklist fetch failed" } };
-  }
-
-  // fetchBlocklist swallows errors internally, so check health for failures
-  const health = getBlocklistHealth();
-  if (health.configured && health.lastError) {
-    const isTimeout =
-      /abort|timeout/i.test(health.lastError);
-    return {
-      blocklist,
-      status: {
-        blocked: true,
-        timedOut: isTimeout,
-        error: health.lastError,
-      },
+    const blocklist: string[] = [];
+    return { 
+      blocklist, 
+      status: { 
+        blocked: true, 
+        timedOut: isTimeout || /abort|timeout/i.test(health.lastError || ""), 
+        error: health.lastError || "Blocklist fetch failed" 
+      } 
     };
   }
-
-  return { blocklist, status: { blocked: false, timedOut: false } };
 }
 
 export async function evaluateSecurity(
