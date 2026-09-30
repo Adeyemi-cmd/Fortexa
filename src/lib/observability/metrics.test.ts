@@ -5,15 +5,21 @@ import {
   ALLOWED_OUTCOMES,
   ALLOWED_RESULTS,
   ALLOWED_ROUTES,
+  ALLOW_OUTCOMES,
+  DENY_OUTCOMES,
   MAX_CARDINALITY,
+  SUBMIT_FAILURE_RESULTS,
   escapePrometheusLabelValue,
   getDecisionOutcomeCounts,
   getMetricsSnapshot,
+  getOpsCounters,
+  getRateLimitRejectionCount,
   getStellarSubmitResultCounts,
   normalizeMethod,
   normalizeRoute,
   recordApiMetric,
   recordDecisionOutcome,
+  recordRateLimitRejection,
   recordStellarSubmitResult,
   resetMetrics,
   toPrometheusText,
@@ -102,10 +108,102 @@ describe("observability metrics", () => {
   it("resets new counters alongside existing buckets", () => {
     recordDecisionOutcome("WARN");
     recordStellarSubmitResult("success");
+    recordRateLimitRejection();
     resetMetrics();
 
     expect(getDecisionOutcomeCounts().size).toBe(0);
     expect(getStellarSubmitResultCounts().size).toBe(0);
+    expect(getRateLimitRejectionCount()).toBe(0);
+  });
+
+  describe("ops counters (dashboard <-> metrics parity)", () => {
+    it("zeroes every counter for an empty snapshot", () => {
+      expect(getMetricsSnapshot().counters).toEqual({
+        allow: 0,
+        deny: 0,
+        rateLimit: 0,
+        submitFailures: 0,
+      });
+    });
+
+    it("rolls allow/deny decisions up by outcome", () => {
+      recordDecisionOutcome("APPROVE");
+      recordDecisionOutcome("WARN");
+      recordDecisionOutcome("REQUIRE_APPROVAL");
+      recordDecisionOutcome("BLOCK");
+
+      expect(getOpsCounters().allow).toBe(2);
+      expect(getOpsCounters().deny).toBe(2);
+    });
+
+    it("counts rate-limit rejections", () => {
+      recordRateLimitRejection();
+      recordRateLimitRejection();
+      recordRateLimitRejection();
+
+      expect(getRateLimitRejectionCount()).toBe(3);
+      expect(getMetricsSnapshot().counters.rateLimit).toBe(3);
+    });
+
+    it("counts submit failures but treats replays and successes as non-failures", () => {
+      recordStellarSubmitResult("success");
+      recordStellarSubmitResult("idempotency_replay");
+      for (const result of SUBMIT_FAILURE_RESULTS) {
+        recordStellarSubmitResult(result);
+      }
+
+      expect(getMetricsSnapshot().counters.submitFailures).toBe(SUBMIT_FAILURE_RESULTS.length);
+      expect(SUBMIT_FAILURE_RESULTS).not.toContain("success");
+      expect(SUBMIT_FAILURE_RESULTS).not.toContain("idempotency_replay");
+    });
+
+    it("never derives counters from request buckets", () => {
+      recordApiMetric({ route: "/api/decision", method: "POST", statusCode: 429, durationMs: 5 });
+
+      const snapshot = getMetricsSnapshot();
+      expect(snapshot.totals.errorCount).toBe(1);
+      expect(snapshot.counters).toEqual({
+        allow: 0,
+        deny: 0,
+        rateLimit: 0,
+        submitFailures: 0,
+      });
+    });
+
+    it("exposes the same numbers through the JSON snapshot and the prometheus body", () => {
+      recordDecisionOutcome("APPROVE");
+      recordDecisionOutcome("BLOCK");
+      recordRateLimitRejection();
+      recordStellarSubmitResult("idempotency_conflict");
+
+      const { counters } = getMetricsSnapshot();
+      const output = toPrometheusText();
+
+      expect(output).toContain(`fortexa_decisions_allowed_total ${counters.allow}`);
+      expect(output).toContain(`fortexa_decisions_denied_total ${counters.deny}`);
+      expect(output).toContain(`fortexa_rate_limit_rejections_total ${counters.rateLimit}`);
+      expect(output).toContain(`fortexa_stellar_submit_failures_total ${counters.submitFailures}`);
+      expect(output).toContain("# TYPE fortexa_decisions_allowed_total counter");
+      expect(output).toContain("# TYPE fortexa_decisions_denied_total counter");
+      expect(output).toContain("# TYPE fortexa_rate_limit_rejections_total counter");
+      expect(output).toContain("# TYPE fortexa_stellar_submit_failures_total counter");
+    });
+
+    it("emits zero-initialised counters so alerts never break on a fresh process", () => {
+      const output = toPrometheusText();
+
+      expect(output).toContain("fortexa_decisions_allowed_total 0");
+      expect(output).toContain("fortexa_decisions_denied_total 0");
+      expect(output).toContain("fortexa_rate_limit_rejections_total 0");
+      expect(output).toContain("fortexa_stellar_submit_failures_total 0");
+    });
+
+    it("keeps allow/deny groups aligned with the exported outcome allowlist", () => {
+      expect(ALLOW_OUTCOMES.every((outcome) => ALLOWED_OUTCOMES.has(outcome))).toBe(true);
+      expect(DENY_OUTCOMES.every((outcome) => ALLOWED_OUTCOMES.has(outcome))).toBe(true);
+      expect(new Set([...ALLOW_OUTCOMES, ...DENY_OUTCOMES]).size).toBe(ALLOWED_OUTCOMES.size);
+      expect(SUBMIT_FAILURE_RESULTS.every((result) => ALLOWED_RESULTS.has(result))).toBe(true);
+    });
   });
 
   describe("allowlist and normalization (SCF high)", () => {

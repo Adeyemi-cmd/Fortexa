@@ -27,7 +27,10 @@ vi.mock("lucide-react", () => {
     CheckCircle2: () => null,
     Clock3: () => null,
     Database: () => null,
+    HelpCircle: () => null,
     Shield: () => null,
+    ShieldAlert: () => null,
+    ShieldCheck: () => null,
     ShieldOff: () => null,
   };
 });
@@ -178,7 +181,7 @@ describe("OpsDashboard lastRefreshed feature", () => {
     setupSuccessfulFetch();
 
     hookIndex = 0;
-    OpsDashboard();
+    OpsDashboard({});
 
     expect(getLastRefreshed()).toBeNull();
   });
@@ -187,7 +190,7 @@ describe("OpsDashboard lastRefreshed feature", () => {
     setupSuccessfulFetch();
 
     hookIndex = 0;
-    OpsDashboard();
+    OpsDashboard({});
 
     // Trigger the effect callback
     expect(mockEffectCb).not.toBeNull();
@@ -209,7 +212,7 @@ describe("OpsDashboard lastRefreshed feature", () => {
     setupSuccessfulFetch();
 
     hookIndex = 0;
-    OpsDashboard();
+    OpsDashboard({});
 
     expect(mockEffectCb).not.toBeNull();
     mockEffectCb!();
@@ -234,7 +237,7 @@ describe("OpsDashboard lastRefreshed feature", () => {
     setupSuccessfulFetch();
 
     hookIndex = 0;
-    OpsDashboard();
+    OpsDashboard({});
 
     expect(mockEffectCb).not.toBeNull();
     mockEffectCb!();
@@ -261,7 +264,7 @@ describe("OpsDashboard lastRefreshed feature", () => {
     setupSuccessfulFetch();
 
     hookIndex = 0;
-    OpsDashboard();
+    OpsDashboard({});
 
     expect(mockEffectCb).not.toBeNull();
     mockEffectCb!();

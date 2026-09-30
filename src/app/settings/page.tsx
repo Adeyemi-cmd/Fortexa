@@ -7,6 +7,7 @@ import { ScenariosCatalog } from "@/components/scenarios-catalog";
 import { TabNav, type TabItem } from "@/components/ui/tab-nav";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
+import { getMetricsSnapshot } from "@/lib/observability/metrics";
 import { listAuditEntries } from "@/lib/storage/audit-store";
 
 const tabs: TabItem[] = [
@@ -30,6 +31,10 @@ export default async function SettingsPage({
   const session = sessionToken ? verifySessionToken(sessionToken) : null;
   const userId = session?.userId;
   const entries = userId ? await listAuditEntries(userId) : [];
+
+  // Ops dashboard loader: read the in-process metrics snapshot directly so the
+  // screen renders the same counters the `/api/metrics` scrape exports.
+  const opsMetricsSnapshot = activeTab === "ops" ? getMetricsSnapshot() : null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -58,7 +63,9 @@ export default async function SettingsPage({
         </div>
       ) : null}
       {activeTab === "scenarios" ? <ScenariosCatalog /> : null}
-      {activeTab === "ops" ? <OpsDashboard /> : null}
+      {activeTab === "ops" && opsMetricsSnapshot ? (
+        <OpsDashboard initialMetrics={opsMetricsSnapshot} />
+      ) : null}
       {activeTab === "activity" ? <ActivityTimeline entries={entries} /> : null}
     </div>
   );

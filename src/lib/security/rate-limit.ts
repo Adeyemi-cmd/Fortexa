@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 
+import { recordRateLimitRejection } from "@/lib/observability/metrics";
 import {
   clearSharedRateLimits,
   isSharedSecurityStateEnabled,
@@ -68,6 +69,10 @@ export async function consumeRateLimit(request: NextRequest, config: BucketConfi
   }
 
   if (current.count >= config.limit) {
+    // Counted here (single choke point) so the ops dashboard and the metrics
+    // scrape report the same rejection count as the 429s actually returned.
+    recordRateLimitRejection();
+
     return {
       ok: false,
       limit: config.limit,

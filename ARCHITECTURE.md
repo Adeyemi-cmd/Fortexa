@@ -375,7 +375,7 @@ stateDiagram-v2
 - `/api/health` for health checks
 - `/api/metrics` for JSON snapshot
 - `/api/metrics?format=prometheus` for scrape-compatible format
-- Ops UI consumes these APIs for dashboarding
+- Ops UI renders the same in-process snapshot: `src/app/settings/page.tsx` (Ops tab, also reached via `/ops`) reads `getMetricsSnapshot()` on the server and hands it to `src/components/ops-dashboard.tsx`, so screen and scrape cannot disagree
 
 ## 9) 🚨 Failure Modes and Current Behavior
 
