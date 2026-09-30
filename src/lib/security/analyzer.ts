@@ -165,6 +165,7 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -189,23 +190,25 @@ async function fetchBlocklistWithTimeout(): Promise<{
     }
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "AbortError";
-
-  // fetchBlocklist swallows errors internally, so check health for failures
-  const health = getBlocklistHealth();
-  if (health.configured && health.lastError) {
-    const isTimeout =
-      /abort|timeout/i.test(health.lastError);
+    // fetchBlocklist swallows errors internally, so also check health for
+    // fetch failures; classify abort-style errors as a timeout.
+    const health = getBlocklistHealth();
+    if (health.configured && health.lastError) {
+      const healthTimeout = isTimeout || /abort|timeout/i.test(health.lastError);
+      return {
+        blocklist: [],
+        status: {
+          blocked: true,
+          timedOut: healthTimeout,
+          error: health.lastError,
+        },
+      };
+    }
     return {
-      blocklist,
-      status: {
-        blocked: true,
-        timedOut: isTimeout,
-        error: health.lastError,
-      },
+      blocklist: [],
+      status: { blocked: isTimeout, timedOut: isTimeout },
     };
   }
-
-  return { blocklist, status: { blocked: false, timedOut: false } };
 }
 
 export async function evaluateSecurity(
@@ -229,7 +232,7 @@ export async function evaluateSecurity(
     await fetchBlocklistWithTimeout();
 
   if (blocklistFetchStatus.timedOut) {
-    analyzerStatus.blocklistStatus = "error";
+    analyzerStatus.blocklistStatus = "timeout";
     analyzerStatus.blocklistTimedOut = true;
     analyzerStatus.blocklistError =
       blocklistFetchStatus.error ?? "Blocklist fetch timed out";
