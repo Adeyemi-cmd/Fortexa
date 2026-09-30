@@ -146,8 +146,6 @@ Before committing a policy change, operators can dry-run the unsaved draft from 
 
 Simulation is strictly read-only: it never saves the policy and never consumes usage. Saving still happens only through `POST /api/policy`. See `src/lib/decision/simulate.ts` and `POST /api/policy/simulate`.
 
-> **Reporting API failures:** Include the `x-request-id` header value from the response (or the `requestId` field from server-side logs) when filing a bug report. See [docs/observability.md](docs/observability.md#reporting-api-failures) for details.
-
 ### 6.2 Signed XDR Payment Path
 
 1. Evaluate action in `/console` with a **payment quote** (`paymentQuoteInput`: destination, optional memo, network). On `APPROVE`/`WARN`, Fortexa stores an immutable `paymentQuote` on the audit entry.
@@ -171,26 +169,7 @@ The policy decision authorizes a fixed payment quote (destination, amount, asset
 
 Client-side UI must pass the same `paymentQuoteInput` at decision time and reuse the returned `auditEntry.id` when building XDR. Mutating any authorized field after approval cannot produce a valid unsigned transaction.
 
-**Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Keys must be 8–255 characters.
-
-A request is identified by `sha256(idempotency key + canonical payment body)`, where the canonical body is the validated request body serialized with sorted keys and with the key fields removed — so a header key and a body key for the same payment hash identically, and the store and the route can never disagree about what "the same request" means.
-
-The key is **claimed** before the transaction is sent to Horizon, so a retry that arrives while the original is still in flight waits for it instead of submitting a second payment:
-
-| Situation | Behavior |
-|---|---|
-| First request under the key | Claims the key (`in_flight`), submits, then stores the status, transaction id, and response body |
-| Retry, same key + same body, original already settled | Returns the stored status and transaction id verbatim with `Idempotency-Replayed: true`; no Horizon call |
-| Retry, same key + same body, original still in flight | Waits up to `FORTEXA_IDEMPOTENCY_IN_FLIGHT_WAIT_MS` (default 5s) for the original result, then replays it; if it never settles, `409` with `code: idempotency_in_flight` and `Retry-After: 1` |
-| Retry, same key + different body (e.g. different destination) | `409 Conflict` immediately, no Horizon call and no second payment built |
-| Original submit failed | Claim is released, so the client can retry the key |
-| Transaction submitted but storing the result failed | The accepted response (with the real transaction id) is still returned and the claim is deliberately left in flight, so the ledger is not hidden behind a 500 that would invite a blind resubmit; the lease expiry is what eventually frees the key |
-
-Only the caller that claimed the key may submit. Claims carry a lease, so a process that dies mid-submit does not brick the key. `PUT`-style first-write-wins applies to the settle step too: a late duplicate can never replace the stored transaction id. Omitting the key preserves the original submit-on-every-request behavior.
-
-Records expire on the existing cleanup path (`maybeRunCleanup`, at most hourly) after `FORTEXA_IDEMPOTENCY_RETENTION_DAYS`. Cleanup never drops a record that is still in flight — only abandoned claims whose lease has expired are collectable.
-
-> Migration note: records written before the claim columns existed carry only a signed-XDR hash, which cannot prove request identity. They fail closed with `409` instead of replaying, and expire normally.
+**Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Results are stored per authenticated user + key + signed-XDR hash. Replaying the same key with the same signed XDR returns the original result (`200`, with header `Idempotency-Replayed: true`) without resubmitting to Horizon. Reusing the same key with a different signed XDR returns `409 Conflict`. Omitting the key preserves the original submit-on-every-request behavior. Keys must be 8–255 characters.
 
 Additional behavior:
 - XDR build timeout configured to 180 seconds.
@@ -203,10 +182,6 @@ Additional behavior:
 - Decisions are appended to audit store at evaluation time.
 - `/activity` reads entries by authenticated session user id.
 - Export endpoint supports `mine` and `all` scopes in JSON/CSV.
-
-### Timestamp timezone
-
-All audit timestamps are recorded and exported in **UTC** (ISO 8601 format with a `Z` suffix, e.g. `2025-06-01T12:00:00.000Z`). This applies to both JSON and CSV exports — the `timestamp` column in CSV output carries the raw UTC string with no local-time conversion. The `from`/`to` query parameters on the export endpoint are also compared against these UTC timestamps, so any filter dates should be expressed in UTC.
 
 ### Hash chain integrity
 
@@ -281,28 +256,54 @@ To clean up local developer state safely, you can use the local demo reset utili
   ```
   *(or `FORTEXA_ALLOW_LOCAL_RESET=true npx tsx scripts/reset-local-demo-state.ts --yes`)*
 
+`.env.example` is intentionally development-oriented and uses Stellar testnet defaults, so it will not pass the production readiness check until you replace the demo values with production configuration.
+
 ---
 
 ## 9) 🌍 Environment Variables
 
-All configuration is documented in [`.env.example`](.env.example). Copy it to `.env.local` and fill in the values you need:
+Reference (`.env.example`):
 
 ```bash
-cp .env.example .env.local
+STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
+# Optional; defaults to testnet passphrase. Must agree with STELLAR_HORIZON_URL.
+STELLAR_NETWORK_PASSPHRASE=
+
+DATABASE_URL=
+DATABASE_SSL=false
+
+FORTEXA_STORE_DIR=
+
+FORTEXA_SHARED_STATE_PATH=
+REDIS_URL=
+
+GROQ_API_KEY=
+GROQ_MODEL=llama-3.3-70b-versatile
+
+FORTEXA_AUTH_SECRET=
+FORTEXA_OPERATOR_WALLETS=
+FORTEXA_VIEWER_WALLETS=
+FORTEXA_AUTH_MAX_ATTEMPTS=5
+FORTEXA_AUTH_LOCK_MINUTES=10
+FORTEXA_JSON_BODY_MAX_BYTES=65536
+
+
+# Optional: extra keys to redact from /api/audit/export payloads.
+# Comma-separated. Matched case-insensitively. Useful for org-specific
+# internal secret names.
+# FORTEXA_AUDIT_EXPORT_SENSITIVE_KEYS=internalSecret,corpApiKey
+
+NEXT_PUBLIC_STELLAR_DESTINATION=
+
+# Optional: keys (comma-separated) treated as sensitive in audit export payloads.
+# See §11.1 Audit Export Redaction.
+# FORTEXA_AUDIT_EXPORT_SENSITIVE_KEYS=internalSecret,corpApiKey
+
+# Optional external blocklist URL for dynamic threat-intel
+# Accepts JSON array of domains or plain-text (one domain per line, # comments ignored)
+# Cached in-memory for 5 minutes; feed failures fall back silently
+FORTEXA_BLOCKLIST_URL=
 ```
-
-The file covers every variable used by the app, organized into:
-
-| Category | Variables |
-|---|---|
-| **Stellar Network** | `STELLAR_HORIZON_URL`, `STELLAR_NETWORK_PASSPHRASE`, `NEXT_PUBLIC_STELLAR_DESTINATION` |
-| **Auth** | `FORTEXA_AUTH_SECRET`, `FORTEXA_OPERATOR_WALLETS`, `FORTEXA_VIEWER_WALLETS`, `FORTEXA_AUTH_CHALLENGE_TTL_SECONDS`, `FORTEXA_AUTH_MAX_ATTEMPTS`, `FORTEXA_AUTH_LOCK_MINUTES` |
-| **Storage** | `DATABASE_URL`, `DATABASE_SSL`, `FORTEXA_STORE_DIR` |
-| **Shared State** | `FORTEXA_SHARED_STATE_PATH`, `REDIS_URL` |
-| **Idempotency** | `FORTEXA_IDEMPOTENCY_RETENTION_DAYS`, `FORTEXA_IDEMPOTENCY_IN_FLIGHT_WAIT_MS` |
-| **Optional Integrations** | `GROQ_API_KEY`, `GROQ_MODEL`, `FORTEXA_BLOCKLIST_URL` |
-| **Request Handling** | `FORTEXA_JSON_BODY_MAX_BYTES` |
-| **Dev Utilities** | `FORTEXA_ALLOW_LOCAL_RESET` |
 
 ---
 
@@ -315,6 +316,7 @@ npm run start
 npm run lint
 npm test
 npm run test:watch
+npm run check:production-readiness
 npm run demo:scenarios
 npm run db:migrate
 ```
@@ -334,6 +336,48 @@ Run the standalone demo runner (prints expected vs actual for every seeded scena
 ```bash
 npm run demo:scenarios
 ```
+
+### Production Readiness Check
+
+Run this before every production deployment and before enabling protected payment flows:
+
+```bash
+npm run check:production-readiness
+```
+
+The readiness check validates:
+
+- `STELLAR_HORIZON_URL`
+- `STELLAR_NETWORK_PASSPHRASE`
+- `FORTEXA_AUTH_SECRET`
+- `FORTEXA_OPERATOR_WALLETS`
+- `DATABASE_URL` or `FORTEXA_STORE_DIR`
+- `REDIS_URL` or `FORTEXA_SHARED_STATE_PATH`
+
+It also rejects unsafe demo/default values such as testnet Horizon endpoints, mismatched Stellar network settings, and local demo file-store paths without printing secret values.
+
+Expected behavior:
+
+- Success: prints `Fortexa production readiness check passed.` and exits `0`.
+- Failure: prints `Fortexa production readiness check failed:` followed by the invalid setting and remediation for each issue, then exits non-zero.
+
+Example success:
+
+```bash
+$ npm run check:production-readiness
+Fortexa production readiness check passed.
+```
+
+Example failure:
+
+```bash
+$ npm run check:production-readiness
+Fortexa production readiness check failed:
+- STELLAR_NETWORK_PASSPHRASE: Testnet passphrase is still configured. Set STELLAR_NETWORK_PASSPHRASE to the Stellar public network passphrase before deployment.
+- DATABASE_URL or FORTEXA_STORE_DIR: No persistent storage backend is explicitly configured. Configure DATABASE_URL for Postgres or set FORTEXA_STORE_DIR to a durable production storage path.
+```
+
+In `NODE_ENV=production`, Fortexa also applies this check before `/api/stellar/build-payment` and `/api/stellar/submit-signed` execute. If configuration is unsafe, those routes return `503` with a non-sensitive issue list and the remediation command instead of attempting the payment flow.
 
 ---
 
@@ -355,6 +399,7 @@ JSON `POST` routes that accept request bodies enforce a shared size limit before
 - `POST /api/policy/simulate` (`operator`) — read-only pre-save simulation
 - `GET /api/policy/history` (`operator`)
 - `POST /api/policy/rollback` (`operator`)
+- `POST /api/policy/rollback/preview` (`operator`) — read-only rollback impact preview
 
 ### Decision / Planning
 - `POST /api/decision` (`operator`)
@@ -369,6 +414,10 @@ JSON `POST` routes that accept request bodies enforce a shared size limit before
     - `GET /api/audit/export?format=csv&scope=mine&from=2025-06-01T00:00:00Z&to=2025-06-30T23:59:59Z`
     - `GET /api/audit/export?format=json&scope=all&decision=BLOCK&domain=malicious.example.com`
     - `GET /api/audit/export?format=json&scope=mine&actionId=evt_abc123`
+  - **Redaction:** All `format=json` and `format=csv` responses are passed through
+    `src/lib/audit/redact.ts` *before* leaving the route — see
+    [§11.1 Audit Export Redaction](#111-audit-export-redaction) below for the full
+    contract (what is redacted, what is preserved, and how to extend it).
 - `GET /api/health`
 - `GET /api/metrics` (`?format=prometheus`)
 
@@ -379,6 +428,65 @@ JSON `POST` routes that accept request bodies enforce a shared size limit before
 - `POST /api/stellar/submit-signed` (supports `Idempotency-Key` header/body for safe UI retries)
 - `POST /api/stellar/pay` (legacy disabled)
 - `POST /api/stellar/fund` (removed behavior, returns `410`)
+
+### 11.1 Audit Export Redaction
+
+Exported operator reports (`/api/audit/export`) are intended for sharing with reviewers
+and external auditors. To make those reports safe to forward, every payload — JSON or
+CSV, `scope=mine` or `scope=all` — is run through `redactAuditExportPayload`
+(`src/lib/audit/redact.ts`) before it leaves the route. The goal is "useful but
+non-leaky": reviewers can still see what was decided, why, and how Horizon responded,
+but they never see raw secrets.
+
+**What is always redacted** (replaced with a `{ "$redacted": "<reason>" }` placeholder):
+
+| Reason            | Examples of redacted keys / values                                            |
+| ----------------- | ---------------------------------------------------------------------------- |
+| `session`         | `sessionKey`, `session_id`, `wallet_session`, `authSession`                  |
+| `token`           | `token`, `accessToken`, `refreshToken`, `bearer`, `authorization`, `auth`, `jwt`, `access_token`, `refresh_token`, plus any value matching a JWT-shaped pattern |
+| `signed_xdr`      | `signedXDR`, `signed_xdr`, `xdr`, `signature`, plus any value that starts with `XDR:`, contains `signed xdr`/`signed tx`, or is a long base64-ish block |
+| `sensitive_field` | Anything that matches a configured sensitive key or pattern that doesn't fit a more specific bucket |
+
+The redaction is recursive — nested objects, arrays, and unknown keys are walked
+until the configured max depth (25). It also catches value-only matches: a JWT-shaped
+string under a benign key (e.g. `note: "eyJ..."`) is still redacted.
+
+**What is preserved (decision evidence):**
+
+- `id`, `timestamp`
+- `decision`, `explanation`
+- `triggeredPolicies`, `riskFindings`
+- `entryHash`, `previousHash` (the audit hash chain itself)
+- `horizonResultCode`, `resultCode`, `opCodes`, `code`, `status`, `reason` — Horizon result codes are kept verbatim so operators can debug `tx_bad_seq`, `tx_insufficient_fee`, `op_no_destination`, `op_underfunded`, etc.
+- `userId`, `exportedBy`, `scope` (the export envelope)
+- CSV columns emitted by the route: `userId`, `id`, `timestamp`, `decision`, `actionId`, `actionName`, `domain`, `amountXLM`, `explanation`, `entryHash`, `previousHash`
+
+**Why this matters for debugging policy and Horizon failures:**
+
+- You can still see which scenario was evaluated, what the decision was, which policy
+  triggers fired, which security findings were raised, and the SHA-256 hash chain.
+- You can still see Horizon `tx_*` and `op_*` result codes.
+- You can never accidentally ship a raw signed XDR, a session token, or a bearer
+  header to a reviewer or a chat tool.
+
+**Extending the redaction list:**
+
+The redaction config supports a per-deployment env override
+`FORTEXA_AUDIT_EXPORT_SENSITIVE_KEYS` (comma-separated). Add a key to that env var
+and the redactor will treat it as sensitive for both JSON and CSV exports in that
+environment.
+
+```bash
+# Example: redact any field named like an internal secret
+FORTEXA_AUDIT_EXPORT_SENSITIVE_KEYS=internalSecret,corpApiKey
+```
+
+The redaction logic itself is unit-tested in `src/lib/audit/redact.test.ts` —
+covering nested payloads, arrays, value-heuristic JWT/XDR matches, allowlisted
+decision evidence, and pattern-based unknown keys — and the export route is
+covered in `src/app/api/audit/export/route.test.ts`, which asserts that
+`scope=all` JSON exports never contain raw `XDR:`, `Bearer ey…`, `sessionKey`,
+or `signedXdr` strings.
 
 ---
 
@@ -397,7 +505,7 @@ JSON `POST` routes that accept request bodies enforce a shared size limit before
 
 ## 13) 📈 Ops / Observability (Appendix)
 
-- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`
+- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`, plus `ready`, `checks`, and `failingChecks` (`production_config`, `storage`, `horizon`). The dashboard shows its pay, fund, and policy actions only while `ready` is `true`.
 - Metrics endpoint: `GET /api/metrics` + Prometheus format
 - `/ops` dashboard shows:
   - service health
@@ -428,9 +536,6 @@ Otherwise Fortexa falls back to local JSON files:
 - local/dev default: `.fortexa/*.json`
 - Vercel default: `/tmp/fortexa/*.json`
 
-File-store writes are atomic (unique staging file + rename) so a crashed write can
-never leave a half-written store behind.
-
 Optional overrides:
 - `FORTEXA_STORE_DIR` to set file-store directory explicitly
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
@@ -456,7 +561,7 @@ Optional overrides:
 - **Charts:** `recharts`
 - **Stellar:** `@stellar/stellar-sdk`, optional `@stellar/freighter-api`
 - **Database:** `pg` (optional Postgres, file fallback enabled)
-- **Tests:** Vitest (`vitest.setup.ts` gives each test file its own file-store directory so parallel suites cannot clobber each other)
+- **Tests:** Vitest
 
 ---
 
@@ -518,3 +623,6 @@ Common Stellar Horizon failures during the signed payment flow:
 ## 19) 📄 License
 
 MIT (see `package.json`).
+
+All done
+...

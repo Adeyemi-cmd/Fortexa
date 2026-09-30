@@ -21,11 +21,11 @@ This document details the operational baseline, hardening criteria, and verifica
 ## 2. Infrastructure & Access Management Configurations
 
 ### Wallet Allowlisting
-* **Operator Wallet Configuration:** Explicitly restrict administrative and operational transaction capabilities using a static allowlist environment string. 
+* **Operator Wallet Configuration:** Explicitly restrict administrative and operational transaction capabilities using a static allowlist environment string.
 * **Zero Wildcards:** Set the `WALLET_ALLOWLIST` value to exact Stellar public keys. Never leave this parameter blank or wildcarded (`*`) in production.
 
 ### Authentication Hardening
-* All deployment authentication tokens must rely on a cryptographically secure `JWT_SECRET`. 
+* All deployment authentication tokens must rely on a cryptographically secure `JWT_SECRET`.
 * Rotate keys periodically via an automated pipeline without bringing down execution engines.
 
 ### Storage Configurations

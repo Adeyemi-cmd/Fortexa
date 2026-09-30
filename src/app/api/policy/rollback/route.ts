@@ -4,8 +4,10 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { readJsonBody } from "@/lib/http/read-json-body";
-import { rollbackPolicyVersion } from "@/lib/storage/policy-store";
+import { collectRollbackConflicts } from "@/lib/decision/rollback-conflicts";
+import { getPolicyVersionByNumber, rollbackPolicyVersion } from "@/lib/storage/policy-store";
 import { policyRollbackSchema } from "@/lib/validation/schemas";
+import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -32,11 +34,33 @@ export async function POST(request: NextRequest) {
     const parsed = policyRollbackSchema.safeParse(bodyResult.data);
 
     if (!parsed.success) {
+      logValidationFailure("Policy rollback validation failed", { ...context, userId: auth.session.userId }, parsed.error, bodyResult.data);
       return jsonWithRequestContext(request, {
         route: "/api/policy/rollback",
         startedAtMs,
         status: 400,
-        body: { error: "Invalid rollback payload.", details: parsed.error.flatten() },
+        body: { error: "Invalid rollback payload.", details: toPublicValidationDetails(parsed.error) },
+      });
+    }
+
+    const targetEntry = await getPolicyVersionByNumber(parsed.data.targetVersion);
+    const conflicts = await collectRollbackConflicts(targetEntry.policy);
+
+    if (conflicts.length > 0) {
+      logWarn("Policy rollback rejected: in-flight payment conflicts", {
+        ...context,
+        userId: auth.session.userId,
+        targetVersion: parsed.data.targetVersion,
+        conflicts: conflicts.length,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy/rollback",
+        startedAtMs,
+        status: 409,
+        body: {
+          error: "Rollback would reject in-flight payments.",
+          conflicts,
+        },
       });
     }
 
@@ -65,7 +89,7 @@ export async function POST(request: NextRequest) {
     return jsonWithRequestContext(request, {
       route: "/api/policy/rollback",
       startedAtMs,
-      status: 500,
+      status: error instanceof Error && error.message.includes("not found") ? 404 : 500,
       body: { error: error instanceof Error ? error.message : "Failed to rollback policy." },
     });
   }

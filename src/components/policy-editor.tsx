@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { History } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,12 +10,29 @@ import { Input } from "@/components/ui/input";
 import { useAuthSession } from "@/lib/auth/use-auth-session";
 import type { SimulationReport, SimulationSource } from "@/lib/decision/simulate";
 import type { DecisionType, PolicyConfig } from "@/lib/types/domain";
+import { PolicyImportExport } from "@/components/policy-import-export";
+import type { PolicyExport } from "@/lib/policy/import-export";
 
 type PolicyResponse = {
   policy?: PolicyConfig;
   updatedAt?: string | null;
   version?: number;
   error?: string;
+};
+
+type PolicyConflictResponse = {
+  error?: string;
+  code?: string;
+  expectedVersion?: number;
+  currentVersion?: number;
+  currentUpdatedAt?: string | null;
+};
+
+type PolicyConflictState = {
+  expectedVersion: number;
+  currentVersion: number;
+  currentUpdatedAt: string | null;
+  message: string;
 };
 
 type PolicyHistoryEntry = {
@@ -31,6 +49,14 @@ type PolicyHistoryResponse = {
 
 type SimulationResponse = {
   report?: SimulationReport;
+  auditSampled?: number;
+  error?: string;
+};
+
+type RollbackPreviewResponse = {
+  report?: SimulationReport;
+  targetVersion?: number;
+  currentVersion?: number;
   auditSampled?: number;
   error?: string;
 };
@@ -64,6 +90,11 @@ export function PolicyEditor() {
   const [simulating, setSimulating] = useState(false);
   const [simulation, setSimulation] = useState<SimulationReport | null>(null);
   const [simStatus, setSimStatus] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<PolicyConflictState | null>(null);
+  const [rollbackPreviewVersion, setRollbackPreviewVersion] = useState<number | null>(null);
+  const [rollbackPreview, setRollbackPreview] = useState<SimulationReport | null>(null);
+  const [rollbackPreviewStatus, setRollbackPreviewStatus] = useState<string | null>(null);
+  const [previewingRollback, setPreviewingRollback] = useState(false);
 
   const writeDisabled = loading || sessionLoading || !isOperator;
 
@@ -78,7 +109,7 @@ export function PolicyEditor() {
     };
   }
 
-  async function loadPolicy() {
+  const loadPolicy = useCallback(async () => {
     setLoading(true);
     try {
       const response = await fetch("/api/policy", { cache: "no-store" });
@@ -96,9 +127,52 @@ export function PolicyEditor() {
       setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
+      setConflict(null);
       setStatus("Policy loaded.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected policy load error.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  /**
+   * Pull the latest server version and replace the editor draft with it.
+   * Used to recover from a 409 Conflict: the operator's local edits are
+   * intentionally discarded so they can re-enter them against the new base.
+   * Asks for an explicit confirmation so a misclick can't wipe out work.
+   */
+  async function discardLocalChangesAndReload() {
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      const acknowledged = window.confirm(
+        "Discard your unsaved policy edits and reload the current server version?",
+      );
+      if (!acknowledged) {
+        return;
+      }
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch("/api/policy", { cache: "no-store" });
+      const payload = (await response.json()) as PolicyResponse;
+
+      if (!response.ok || payload.error || !payload.policy) {
+        setStatus(payload.error ?? "Reload failed — please try again.");
+        return;
+      }
+
+      setPolicy(payload.policy);
+      setAllowedDomains(listToText(payload.policy.allowedDomains));
+      setBlockedDomains(listToText(payload.policy.blockedDomains));
+      setAllowedTools(listToText(payload.policy.allowedTools));
+      setBlockedTools(listToText(payload.policy.blockedTools));
+      setUpdatedAt(payload.updatedAt ?? null);
+      setVersion(payload.version ?? null);
+      setConflict(null);
+      setStatus("Reloaded latest policy from server. Local edits discarded — please re-enter your changes.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unexpected reload error.");
     } finally {
       setLoading(false);
     }
@@ -116,14 +190,44 @@ export function PolicyEditor() {
     }
 
     setLoading(true);
+    setConflict(null);
     try {
       const nextPolicy = buildDraftPolicy(policy);
+      // Send the version we loaded against so the server can detect another
+      // operator's concurrent save. Missing it keeps the legacy behavior.
+      const body = JSON.stringify({
+        ...nextPolicy,
+        ...(version !== null ? { expectedVersion: version } : {}),
+      });
 
       const response = await fetch("/api/policy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(nextPolicy),
+        body,
       });
+
+      if (response.status === 409) {
+        const conflictBody = (await response.json().catch(() => ({}))) as PolicyConflictResponse;
+        const expectedVersion =
+          conflictBody.expectedVersion ?? version ?? -1;
+        const currentVersion = conflictBody.currentVersion ?? -1;
+        setConflict({
+          expectedVersion,
+          currentVersion,
+          currentUpdatedAt: conflictBody.currentUpdatedAt ?? null,
+          message:
+            conflictBody.error ??
+            "Policy was changed by another operator. Please reload and retry.",
+        });
+        setStatus(
+          `Conflict: server is at v${conflictBody.currentVersion ?? "?"}, your edit was based on v${
+            conflictBody.expectedVersion ?? version ?? "?"
+          }.`,
+        );
+        // Refresh history view in case the other operator's save landed.
+        void loadHistory();
+        return;
+      }
 
       const payload = (await response.json()) as PolicyResponse;
 
@@ -133,6 +237,10 @@ export function PolicyEditor() {
       }
 
       setPolicy(payload.policy);
+      setAllowedDomains(listToText(payload.policy.allowedDomains));
+      setBlockedDomains(listToText(payload.policy.blockedDomains));
+      setAllowedTools(listToText(payload.policy.allowedTools));
+      setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
       setStatus("Policy updated successfully.");
@@ -194,7 +302,7 @@ export function PolicyEditor() {
     }
   }
 
-  async function loadHistory() {
+  const loadHistory = useCallback(async () => {
     try {
       const response = await fetch("/api/policy/history?limit=8", { cache: "no-store" });
       const payload = (await response.json()) as PolicyHistoryResponse;
@@ -207,11 +315,63 @@ export function PolicyEditor() {
     } catch {
       setHistory([]);
     }
+  }, []);
+
+  async function previewRollback(versionToPreview: number) {
+    if (!isOperator) {
+      setStatus("Viewer role is read-only. Login as operator to preview rollback.");
+      return;
+    }
+
+    setPreviewingRollback(true);
+    setRollbackPreviewStatus(null);
+    setRollbackPreview(null);
+    setRollbackPreviewVersion(versionToPreview);
+
+    try {
+      const response = await fetch("/api/policy/rollback/preview", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetVersion: versionToPreview, includeAudit }),
+      });
+
+      const payload = (await response.json()) as RollbackPreviewResponse;
+
+      if (!response.ok || payload.error || !payload.report) {
+        setRollbackPreviewVersion(null);
+        setRollbackPreviewStatus(payload.error ?? "Rollback preview failed.");
+        return;
+      }
+
+      setRollbackPreview(payload.report);
+      const { changed, total } = payload.report.summary;
+      const auditNote =
+        includeAudit && (payload.auditSampled ?? 0) === 0
+          ? " No recent audit actions were available to sample."
+          : includeAudit
+            ? ` Included ${payload.auditSampled} recent audit action(s).`
+            : "";
+      setRollbackPreviewStatus(
+        `Preview for v${versionToPreview}: ${changed} of ${total} decision(s) would change. Nothing was saved.${auditNote}`,
+      );
+    } catch (error) {
+      setRollbackPreviewVersion(null);
+      setRollbackPreviewStatus(error instanceof Error ? error.message : "Unexpected rollback preview error.");
+    } finally {
+      setPreviewingRollback(false);
+    }
   }
 
-  async function rollback(versionToRollback: number) {
+  async function confirmRollback(versionToRollback: number) {
     if (!isOperator) {
       setStatus("Viewer role is read-only. Login as operator to rollback policy.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Restore policy version ${versionToRollback}? This creates a new policy version with the historical rules.`,
+    );
+    if (!confirmed) {
       return;
     }
 
@@ -237,6 +397,9 @@ export function PolicyEditor() {
       setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
+      setRollbackPreview(null);
+      setRollbackPreviewVersion(null);
+      setRollbackPreviewStatus(null);
       setStatus(`Rollback successful to version ${versionToRollback}.`);
       await loadHistory();
     } catch (error) {
@@ -246,11 +409,48 @@ export function PolicyEditor() {
     }
   }
 
+  async function handleImportPolicy(document: PolicyExport) {
+    if (!isOperator) {
+      throw new Error("Viewer role is read-only. Login as operator to import policy.");
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch("/api/policy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(document),
+      });
+
+      const payload = (await response.json()) as PolicyResponse;
+
+      if (!response.ok || payload.error || !payload.policy) {
+        throw new Error(payload.error ?? "Failed to save imported policy.");
+      }
+
+      setPolicy(payload.policy);
+      setAllowedDomains(listToText(payload.policy.allowedDomains));
+      setBlockedDomains(listToText(payload.policy.blockedDomains));
+      setAllowedTools(listToText(payload.policy.allowedTools));
+      setBlockedTools(listToText(payload.policy.blockedTools));
+      setUpdatedAt(payload.updatedAt ?? null);
+      setVersion(payload.version ?? null);
+      setStatus("Policy imported successfully.");
+      await loadHistory();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Unexpected import error.");
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
     void loadPolicy();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadHistory();
-  }, []);
+  }, [loadPolicy, loadHistory]);
 
   return (
     <div className="space-y-6">
@@ -373,15 +573,35 @@ export function PolicyEditor() {
         </Card>
       </section>
 
+        <PolicyImportExport
+          currentPolicy={policy}
+          currentVersion={version}
+          onImportApproved={handleImportPolicy}
+          isOperator={isOperator}
+          isLoading={loading || sessionLoading}
+        />
+
       <Card>
         <CardHeader>
           <CardTitle>Policy Version History</CardTitle>
           <CardDescription>
-            Select two versions to compare, or rollback to a prior version.
+            Preview rollback impact before restoring a prior version. Confirmation is required before applying.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
-          {history.length === 0 ? <p className="text-sm text-[hsl(var(--muted-foreground))]">No history records.</p> : null}
+          {history.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.15)] px-6 py-10 text-center">
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-[hsl(var(--muted)/0.4)]">
+                <History className="h-5 w-5 text-[hsl(var(--muted-foreground))]" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-[hsl(var(--foreground))]">No version history yet</p>
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">
+                  Saved policy changes will appear here. After your first policy update, each version will be listed for comparison and rollback.
+                </p>
+              </div>
+            </div>
+          ) : null}
           {history.map((entry) => {
             const isA = diffA === entry.version;
             const isB = diffB === entry.version;
@@ -423,17 +643,9 @@ export function PolicyEditor() {
                   <Button
                     variant="outline"
                     size="sm"
-                    disabled={writeDisabled || version === entry.version}
-                    onClick={() => rollback(entry.version)}
-                    title={
-                      writeDisabled
-                        ? "Viewer mode is read-only"
-                        : version === entry.version
-                          ? "Cannot rollback to the current active version"
-                          : "Rollback to this version"
-                    }
+                    onClick={() => previewRollback(entry.version)}
                   >
-                    Rollback
+                    Preview
                   </Button>
                 </div>
               </div>
@@ -458,6 +670,32 @@ export function PolicyEditor() {
             <p className="text-sm text-[hsl(var(--muted-foreground))] pt-2">
               Select one more version ({diffA !== null ? "B" : "A"}) to compare.
             </p>
+          ) : null}
+
+          {rollbackPreviewStatus ? (
+            <Alert className="border-[hsl(var(--accent)/0.2)] bg-[hsl(var(--accent)/0.05)]">
+              <AlertTitle>Rollback preview</AlertTitle>
+              <AlertDescription>{rollbackPreviewStatus}</AlertDescription>
+            </Alert>
+          ) : null}
+
+          {previewingRollback ? (
+            <p className="text-sm text-[hsl(var(--muted-foreground))]">Evaluating rollback impact...</p>
+          ) : rollbackPreview && rollbackPreviewVersion !== null ? (
+            <div className="space-y-3">
+              <SimulationPanel
+                report={rollbackPreview}
+                labels={{ from: "Current", to: `Rollback v${rollbackPreviewVersion}` }}
+              />
+              <Button
+                variant="danger"
+                size="sm"
+                disabled={writeDisabled || loading}
+                onClick={() => confirmRollback(rollbackPreviewVersion)}
+              >
+                Confirm rollback to v{rollbackPreviewVersion}
+              </Button>
+            </div>
           ) : null}
         </CardContent>
       </Card>
@@ -506,6 +744,42 @@ export function PolicyEditor() {
         <Button variant="outline" onClick={loadPolicy} disabled={loading}>Reload</Button>
         <Button variant="outline" onClick={loadHistory} disabled={loading}>Reload History</Button>
       </div>
+
+      {conflict ? (
+        <Alert className="border-red-500/40 bg-red-500/10">
+          <AlertTitle>Save conflict — another operator edited this policy</AlertTitle>
+          <AlertDescription>
+            <p>{conflict.message}</p>
+            <p className="mt-1 text-sm">
+              Your save was based on{" "}
+              <span className="font-semibold">v{conflict.expectedVersion}</span>; the server is now at{" "}
+              <span className="font-semibold">v{conflict.currentVersion}</span>
+              {conflict.currentUpdatedAt
+                ? ` (updated ${conflict.currentUpdatedAt})`
+                : ""}
+              . Your changes were not discarded automatically.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={discardLocalChangesAndReload}
+                disabled={loading}
+              >
+                Reload latest &amp; discard my changes
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setConflict(null)}
+                disabled={loading}
+              >
+                Dismiss
+              </Button>
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       <Alert className="border-[hsl(var(--accent)/0.2)] bg-[hsl(var(--accent)/0.05)]">
         <AlertTitle>Policy status</AlertTitle>
@@ -603,7 +877,13 @@ function DecisionTag({ decision }: { decision: DecisionType }) {
   );
 }
 
-function SimulationPanel({ report }: { report: SimulationReport }) {
+function SimulationPanel({
+  report,
+  labels = { from: "Current", to: "Proposed" },
+}: {
+  report: SimulationReport;
+  labels?: { from: string; to: string };
+}) {
   if (report.cases.length === 0) {
     return (
       <p className="text-sm text-[hsl(var(--muted-foreground))]">
@@ -637,8 +917,10 @@ function SimulationPanel({ report }: { report: SimulationReport }) {
                 <p className="text-xs text-[hsl(var(--muted-foreground))]">{SOURCE_LABEL[entry.source]}</p>
               </div>
               <div className="flex items-center gap-2">
+                <span className="text-xs text-[hsl(var(--muted-foreground))]">{labels.from}</span>
                 <DecisionTag decision={entry.current.decision} />
                 <span className="text-[hsl(var(--muted-foreground))]">→</span>
+                <span className="text-xs text-[hsl(var(--muted-foreground))]">{labels.to}</span>
                 <DecisionTag decision={entry.proposed.decision} />
                 {entry.changed ? (
                   <span className="text-xs font-semibold text-amber-400">changed</span>

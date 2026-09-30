@@ -1,4 +1,5 @@
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_FETCH_TIMEOUT_MS = 5000; // 5 second timeout for blocklist fetch
 
 let cachedDomains: string[] = [];
 let cacheExpiresAt = 0;
@@ -11,6 +12,16 @@ export type BlocklistHealth = {
   domainCount: number;
   lastError: string | null;
 };
+
+/** Get the configured blocklist fetch timeout in milliseconds. */
+function getBlocklistTimeout(): number {
+  const envTimeout = process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS;
+  if (envTimeout) {
+    const parsed = parseInt(envTimeout, 10);
+    return isNaN(parsed) ? DEFAULT_FETCH_TIMEOUT_MS : Math.max(100, parsed);
+  }
+  return DEFAULT_FETCH_TIMEOUT_MS;
+}
 
 /** Return current blocklist feed health without triggering a refresh. */
 export function getBlocklistHealth(): BlocklistHealth {
@@ -30,7 +41,8 @@ export async function fetchBlocklist(): Promise<string[]> {
   if (Date.now() < cacheExpiresAt) return cachedDomains;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const timeoutMs = getBlocklistTimeout();
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     const text = await res.text();
@@ -52,7 +64,9 @@ export async function fetchBlocklist(): Promise<string[]> {
     lastRefreshAt = new Date().toISOString();
     lastErrorSummary = null;
   } catch (err) {
-    lastErrorSummary = err instanceof Error ? err.message : "Unknown fetch error";
+    lastErrorSummary =
+      err instanceof Error ? err.message : "Unknown fetch error";
+    throw err;
   }
 
   return cachedDomains;
@@ -64,4 +78,29 @@ export function resetBlocklistCache(): void {
   cacheExpiresAt = 0;
   lastRefreshAt = null;
   lastErrorSummary = null;
+}
+
+export type BlocklistVerdict =
+  | { allow: true; reasonCode: null }
+  | { allow: false; reasonCode: "BLOCKLIST_MATCH" };
+
+/**
+ * Check a destination domain against the blocklist. On a failed refresh the
+ * last cached list is still consulted so a known-bad domain is never allowed
+ * just because the feed is unreachable.
+ */
+export async function checkBlocklist(domain: string): Promise<BlocklistVerdict> {
+  let domains: string[];
+  try {
+    domains = await fetchBlocklist();
+  } catch {
+    domains = cachedDomains;
+  }
+
+  const normalized = domain.trim().toLowerCase();
+  const listed = domains.some((entry) => entry.trim().toLowerCase() === normalized);
+
+  return listed
+    ? { allow: false, reasonCode: "BLOCKLIST_MATCH" }
+    : { allow: true, reasonCode: null };
 }

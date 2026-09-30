@@ -284,17 +284,18 @@ Each audit entry appended via `appendAuditEntry` is enriched with two fields bef
 
 The `entry_hash` column on `FORTEXA_AUDIT_ENTRIES` (migration `002_audit_hash_chain`) holds this value for fast lookup of the previous hash during inserts.
 
-**Verification** — `verifyHashChain(entries)` (`src/lib/audit/hash-chain.ts`):
+**Verification** — `verifyHashChain(entries, boundaries?)` (`src/lib/audit/hash-chain.ts`):
 
 1. Sorts entries chronologically by `timestamp`.
 2. Skips entries without `entryHash`/`previousHash` (legacy, pre-chain entries).
 3. For each hashed entry, checks that `previousHash` equals the preceding hashed entry's `entryHash` (or `GENESIS_HASH` for the first).
 4. Recomputes `entryHash` from current field values and compares to the stored value.
-5. Returns `{ valid: false, reason, entryId }` on the first violation found.
+5. When an export includes `chainBoundary` (or `chainBoundariesByUser` for an all-user export), checks the expected first and last hashes. A declared first boundary also allows verification of filtered segments whose first `previousHash` is not the genesis sentinel.
+6. Returns `{ valid: false, reason, entryId }` on the first violation found.
 
 This detects:
 - **Modified entries** — any field change invalidates `entryHash`.
-- **Deleted entries** — the next entry's `previousHash` no longer matches.
+- **Deleted entries** — the next entry's `previousHash` no longer matches; explicit export boundaries also detect deletion of the first or last exported record.
 - **Reordered entries** — the chain order breaks even if timestamps are adjusted.
 
 Limitations: the chain is append-only tamper evidence, not a cryptographically signed ledger. An adversary with full write access to the store can rewrite the entire chain. The design goal is detection of unintended or casual tampering, not adversarial forgery.
@@ -314,6 +315,17 @@ This fallback is intentional for local resilience, but introduces consistency tr
 - Migration definitions: `src/lib/storage/migrations.ts`
 - Runtime bootstrap: `src/lib/storage/db.ts`
 - Script: `npm run db:migrate`
+
+### 6.5 Policy Payload Resilience Contract
+
+Stored policy JSON (current state + history) can outlive the active schema. To prevent silent corruption when `policyConfigSchema` evolves:
+
+- Valid current payloads parse unchanged.
+- Older payloads missing *only* documented optional fields are migrated by `parseStoredPolicy` (`src/lib/policy/migrations.ts`), which fills the safe defaults listed in `OPTIONAL_DEFAULTS` and reports the exact set of migrations applied.
+- Malformed payloads (wrong types, unsafe values, mixes of missing-optional and non-rectifiable issues) fail closed with a structured `{ ok: false, error, issues }` result. Every Zod issue is surfaced with its path and message — no defaults are silently substituted for non-optional fields.
+- The strict schema is never weakened for backwards compatibility. Migrating a new optional field is an explicit one-line change to `OPTIONAL_DEFAULTS` plus a corresponding fixture under `src/lib/policy/__fixtures__/`.
+- `parseStoredPolicy` is a pure helper: it does not read or rewrite `.fortexa/` policy files. Callers decide whether to persist a migrated policy, reject one, or surface the error.
+- Smoke coverage lives at `src/lib/policy/migrations.test.ts`.
 
 ## 7) 🔐 Security and Trust Boundaries
 

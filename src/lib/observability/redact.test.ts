@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { redactSensitiveFields } from "@/lib/observability/redact";
+import { redactMetricText, redactSensitiveFields } from "@/lib/observability/redact";
 
 describe("redactSensitiveFields", () => {
   it("redacts a flat object with sensitive keys", () => {
@@ -132,5 +132,50 @@ describe("redactSensitiveFields", () => {
     expect(redactSensitiveFields(true)).toBe(true);
     expect(redactSensitiveFields(null)).toBe(null);
     expect(redactSensitiveFields(undefined)).toBe(undefined);
+  });
+});
+
+describe("redactMetricText", () => {
+  const wallet = "GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR";
+
+  it("redacts sensitive key/value pairs in error text", () => {
+    expect(redactMetricText("submit failed token=abc123")).toBe("submit failed token=[REDACTED]");
+    expect(redactMetricText("error: secret=s3cret-value")).toBe("error: secret=[REDACTED]");
+    expect(redactMetricText("xdr='AAAA signed payload'")).toBe("xdr=[REDACTED]");
+    expect(redactMetricText("GROQ_API_KEY=sk-live-123")).toBe("GROQ_API_KEY=[REDACTED]");
+  });
+
+  it("redacts destination and memo values in error text", () => {
+    expect(redactMetricText(`payment rejected destination=${wallet}`)).toBe(
+      "payment rejected destination=[REDACTED]"
+    );
+    expect(redactMetricText("payment rejected memo: hello-world")).toBe(
+      "payment rejected memo: [REDACTED]"
+    );
+  });
+
+  it("redacts bare wallet addresses", () => {
+    expect(redactMetricText(`horizon error for ${wallet} at op 1`)).toBe(
+      "horizon error for [REDACTED] at op 1"
+    );
+  });
+
+  it("redacts bearer tokens", () => {
+    expect(redactMetricText("auth failed: Bearer abc.def.ghi")).toBe(
+      "auth failed: Bearer [REDACTED]"
+    );
+  });
+
+  it("collapses embedded newlines so a help line stays single-line", () => {
+    expect(redactMetricText("line one\nline two\r\nline three")).toBe(
+      "line one line two line three"
+    );
+  });
+
+  it("preserves plain help text unchanged", () => {
+    expect(redactMetricText("Total API requests by route/method")).toBe(
+      "Total API requests by route/method"
+    );
+    expect(redactMetricText("")).toBe("");
   });
 });

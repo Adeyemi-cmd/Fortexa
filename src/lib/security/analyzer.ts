@@ -1,5 +1,23 @@
-import type { AgentAction, SecurityEvaluation, SecurityFinding } from "@/lib/types/domain";
-import { fetchBlocklist } from "@/lib/security/blocklist";
+import type {
+  AgentAction,
+  AnalyzerStatus,
+  SecurityEvaluation,
+  SecurityFinding,
+} from "@/lib/types/domain";
+import {
+  fetchBlocklist,
+  getBlocklistHealth,
+} from "@/lib/security/blocklist";
+
+/** Configuration for analyzer timeout behavior. */
+export interface AnalyzerConfig {
+  blocklistTimeoutMs: number;
+}
+
+/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
+export const defaultAnalyzerConfig: AnalyzerConfig = {
+  blocklistTimeoutMs: 5000,
+};
 
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
@@ -15,7 +33,11 @@ const highRiskTlds = [".zip", ".click", ".top", ".ru"];
 function reputationCheck(domain: string): SecurityFinding[] {
   const findings: SecurityFinding[] = [];
 
-  if (domain.includes("evil") || domain.includes("drainer") || domain.includes("phish")) {
+  if (
+    domain.includes("evil") ||
+    domain.includes("drainer") ||
+    domain.includes("phish")
+  ) {
     findings.push({
       code: "DOMAIN_REPUTATION_HIGH_RISK",
       title: "High-risk destination",
@@ -39,7 +61,8 @@ function reputationCheck(domain: string): SecurityFinding[] {
     findings.push({
       code: "POTENTIAL_REDIRECT_TRAP",
       title: "Possible redirect mismatch",
-      detail: "Endpoint naming suggests potential redirect/man-in-the-middle behavior.",
+      detail:
+        "Endpoint naming suggests potential redirect/man-in-the-middle behavior.",
       severity: "medium",
       scoreDelta: 12,
     });
@@ -67,7 +90,7 @@ function outputSafetyCheck(outputPreview?: string): SecurityFinding[] {
     }
   }
 
-  if (/private key|secret seed|mnemonic/i.test(outputPreview)) {
+  if (/private key|secret key|secret seed|mnemonic/i.test(outputPreview)) {
     findings.push({
       code: "SECRET_TARGETING",
       title: "Sensitive secret extraction attempt",
@@ -106,33 +129,92 @@ function targetCheck(action: AgentAction): SecurityFinding[] {
   return findings;
 }
 
-function blocklistCheck(domain: string, blocklist: string[]): SecurityFinding[] {
+function blocklistCheck(
+  domain: string,
+  blocklist: string[],
+): SecurityFinding[] {
   if (blocklist.includes(domain)) {
-    return [{
-      code: "BLOCKLIST_MATCH",
-      title: "Domain on external blocklist",
-      detail: `Domain ${domain} is present in the configured threat-intel blocklist.`,
-      severity: "high",
-      scoreDelta: 50,
-    }];
+    return [
+      {
+        code: "BLOCKLIST_MATCH",
+        title: "Domain on external blocklist",
+        detail: `Domain ${domain} is present in the configured threat-intel blocklist.`,
+        severity: "high",
+        scoreDelta: 50,
+      },
+    ];
   }
   return [];
 }
 
-export async function evaluateSecurity(action: AgentAction): Promise<SecurityEvaluation> {
-  const blocklist = await fetchBlocklist();
+/**
+ * Fetch the blocklist and report whether the feed was reachable.
+ * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
+ * failure we fall back to an empty list and report the degraded status.
+ */
+async function fetchBlocklistWithTimeout(): Promise<{
+  blocklist: string[];
+  status: { blocked: boolean; timedOut: boolean; error?: string };
+}> {
+  try {
+    const blocklist = await fetchBlocklist();
+    return { blocklist, status: { blocked: false, timedOut: false } };
+  } catch (err) {
+    const health = getBlocklistHealth();
+    const error =
+      health.lastError ??
+      (err instanceof Error ? err.message : "Unknown fetch error");
+    const timedOut =
+      (err instanceof Error &&
+        (err.name === "AbortError" || err.name === "TimeoutError")) ||
+      /abort|timed? ?out/i.test(error);
+    return { blocklist: [], status: { blocked: true, timedOut, error } };
+  }
+}
 
+export async function evaluateSecurity(
+  action: AgentAction,
+): Promise<SecurityEvaluation> {
+  const analyzerStatus: AnalyzerStatus = {
+    blocklistStatus: "success",
+    isDegraded: false,
+    degradationReasons: [],
+  };
+
+  // Run local checks (always succeed)
   const findings = [
     ...reputationCheck(action.domain),
-    ...blocklistCheck(action.domain, blocklist),
     ...outputSafetyCheck(action.outputPreview),
     ...targetCheck(action),
   ];
 
+  // Fetch blocklist with timeout handling
+  const { blocklist, status: blocklistFetchStatus } =
+    await fetchBlocklistWithTimeout();
+
+  if (blocklistFetchStatus.timedOut) {
+    analyzerStatus.blocklistStatus = "timeout";
+    analyzerStatus.blocklistTimedOut = true;
+    analyzerStatus.blocklistError =
+      blocklistFetchStatus.error ?? "Blocklist fetch timed out";
+    analyzerStatus.isDegraded = true;
+    analyzerStatus.degradationReasons?.push("blocklist_timeout");
+  } else if (blocklistFetchStatus.blocked) {
+    analyzerStatus.blocklistStatus = "error";
+    analyzerStatus.blocklistError = blocklistFetchStatus.error;
+    analyzerStatus.isDegraded = true;
+    analyzerStatus.degradationReasons?.push("blocklist_fetch_failed");
+  } else {
+    analyzerStatus.blocklistStatus = "success";
+  }
+
+  // Add blocklist findings (if available)
+  findings.push(...blocklistCheck(action.domain, blocklist));
+
   const riskScore = Math.min(
     100,
-    findings.reduce((acc, finding) => acc + finding.scoreDelta, 10)
+    findings.reduce((acc, finding) => acc + finding.scoreDelta, 10),
   );
 
-  return { riskScore, findings };
+  return { riskScore, findings, analyzerStatus };
 }

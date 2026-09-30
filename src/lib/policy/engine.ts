@@ -1,6 +1,39 @@
 import { isWithinInterval } from "date-fns";
+import { normalizeDomain } from "@/lib/policy/domain";
 
 import type { AgentAction, DailyUsage, PolicyConfig, PolicyEvaluation, PolicyTrigger } from "@/lib/types/domain";
+import { toNearestStroops } from "@/lib/stellar/stroops";
+
+/** Raised when one policy rule list contains the same identifier twice. */
+export class DuplicateRuleError extends Error {
+  public readonly field: string;
+  public readonly value: string;
+
+  constructor(field: string, value: string) {
+    super(
+      `Duplicate rule identifier "${value}" found in ${field}. Remove the duplicate before saving or evaluating the policy.`,
+    );
+    this.name = "DuplicateRuleError";
+    this.field = field;
+    this.value = value;
+  }
+}
+
+const RULE_LISTS: Array<keyof Pick<
+  PolicyConfig,
+  "allowedDomains" | "blockedDomains" | "allowedTools" | "blockedTools"
+>> = ["allowedDomains", "blockedDomains", "allowedTools", "blockedTools"];
+
+/** Reject repeated identifiers within any single policy rule list. */
+export function validateNoDuplicateRules(policy: PolicyConfig): void {
+  for (const field of RULE_LISTS) {
+    const seen = new Set<string>();
+    for (const id of policy[field]) {
+      if (seen.has(id)) throw new DuplicateRuleError(field, id);
+      seen.add(id);
+    }
+  }
+}
 
 export const defaultPolicyConfig: PolicyConfig = {
   allowedDomains: ["api.safe-research.ai", "tools.verified-data.dev", "workers.fortexa-demo.stellar"],
@@ -18,22 +51,32 @@ export const defaultPolicyConfig: PolicyConfig = {
 };
 
 export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage: DailyUsage): PolicyEvaluation {
+  validateNoDuplicateRules(policy);
   const triggers: PolicyTrigger[] = [];
+  const normalizedDomain = normalizeDomain(action.domain);
 
-  if (policy.blockedDomains.includes(action.domain)) {
+  if (!normalizedDomain) {
     triggers.push({
-      code: "BLOCKED_DOMAIN",
-      message: `Domain ${action.domain} is explicitly blocked by policy.`,
+      code: "MALFORMED_DOMAIN",
+      message: `Domain ${action.domain} is malformed or invalid.`,
       severity: "high",
     });
-  }
+  } else {
+    if (policy.blockedDomains.includes(normalizedDomain)) {
+      triggers.push({
+        code: "BLOCKED_DOMAIN",
+        message: `Domain ${normalizedDomain} is explicitly blocked by policy.`,
+        severity: "high",
+      });
+    }
 
-  if (!policy.allowedDomains.includes(action.domain)) {
-    triggers.push({
-      code: "UNLISTED_DOMAIN",
-      message: `Domain ${action.domain} is not present in allowlist.`,
-      severity: "medium",
-    });
+    if (!policy.allowedDomains.includes(normalizedDomain)) {
+      triggers.push({
+        code: "UNLISTED_DOMAIN",
+        message: `Domain ${normalizedDomain} is not present in allowlist.`,
+        severity: "medium",
+      });
+    }
   }
 
   if (action.tool && policy.blockedTools.includes(action.tool)) {
@@ -52,7 +95,13 @@ export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage:
     });
   }
 
-  if (action.amountXLM > policy.perTxCapXLM) {
+  // Keep cap arithmetic in integer stroops so decimal XLM values do not drift.
+  const amountStroops = toNearestStroops(action.amountXLM);
+  const perTxCapStroops = toNearestStroops(policy.perTxCapXLM);
+  const dailyCapStroops = toNearestStroops(policy.dailyCapXLM);
+  const spentStroops = toNearestStroops(usage.spentXLM);
+
+  if (amountStroops > perTxCapStroops) {
     triggers.push({
       code: "PER_TX_CAP_EXCEEDED",
       message: `Amount ${action.amountXLM} XLM exceeds per transaction cap (${policy.perTxCapXLM} XLM).`,
@@ -60,7 +109,7 @@ export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage:
     });
   }
 
-  if (usage.spentXLM + action.amountXLM > policy.dailyCapXLM) {
+  if (spentStroops + amountStroops > dailyCapStroops) {
     triggers.push({
       code: "DAILY_CAP_EXCEEDED",
       message: `Action would exceed daily budget (${policy.dailyCapXLM} XLM).`,
@@ -92,7 +141,7 @@ export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage:
     }
   }
 
-  const hardBlock = triggers.some((t) => t.severity === "high" && ["BLOCKED_DOMAIN", "BLOCKED_TOOL"].includes(t.code));
+  const hardBlock = triggers.some((t) => t.severity === "high" && ["BLOCKED_DOMAIN", "BLOCKED_TOOL", "MALFORMED_DOMAIN"].includes(t.code));
   const requireApproval = triggers.some((t) => t.code === "PER_TX_CAP_EXCEEDED" || t.code === "DAILY_CAP_EXCEEDED");
   const warning = triggers.some((t) => t.severity === "medium");
 

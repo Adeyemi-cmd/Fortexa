@@ -104,4 +104,25 @@ export const STORAGE_MIGRATIONS: SqlMigration[] = [
         ON fortexa_submit_idempotency (created_at);
     `,
   },
+  {
+    id: "006_audit_chain_sequence",
+    sql: `
+      ALTER TABLE fortexa_audit_entries
+        ADD COLUMN IF NOT EXISTS chain_sequence BIGINT;
+
+      WITH ordered_entries AS (
+        SELECT id,
+          ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY timestamp ASC, id ASC) AS sequence
+        FROM fortexa_audit_entries
+      )
+      UPDATE fortexa_audit_entries AS entries
+      SET chain_sequence = ordered_entries.sequence
+      FROM ordered_entries
+      WHERE entries.id = ordered_entries.id
+        AND entries.chain_sequence IS NULL;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS fortexa_audit_entries_user_sequence_idx
+        ON fortexa_audit_entries (user_id, chain_sequence);
+    `,
+  },
 ];

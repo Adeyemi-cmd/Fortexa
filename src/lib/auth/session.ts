@@ -8,10 +8,18 @@ export type AuthSession = {
   userId: string;
   email: string;
   role: AuthRole;
+  /**
+   * Session id. Minted once at login and carried forward by refresh, so every
+   * token generation of one login shares it. Logout revokes by this id.
+   */
+  sid: string;
   exp: number;
 };
 
 export const AUTH_COOKIE_KEY = "fortexa_session";
+
+/** Longest lifetime any session token is issued with. */
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
 function getAuthSecret() {
   const secret = process.env.FORTEXA_AUTH_SECRET?.trim();
@@ -35,13 +43,20 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number }) {
+export function createSessionToken(input: {
+  email: string;
+  role: AuthRole;
+  userId?: string;
+  sessionId?: string;
+  expiresInSeconds?: number;
+}) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
-    exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
+    sid: input.sessionId ?? randomUUID(),
+    exp: now + (input.expiresInSeconds ?? SESSION_MAX_AGE_SECONDS),
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));
@@ -73,7 +88,15 @@ export function verifySessionToken(token: string): AuthSession | null {
   try {
     const parsed = JSON.parse(decodeBase64Url(payloadPart)) as AuthSession;
 
-    if (!parsed.userId || !parsed.email || !parsed.role || !parsed.exp) {
+    // A token without a session id cannot be revoked, so it is not accepted.
+    if (
+      !parsed.userId ||
+      !parsed.email ||
+      !parsed.role ||
+      !parsed.exp ||
+      typeof parsed.sid !== "string" ||
+      !parsed.sid
+    ) {
       return null;
     }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchBlocklist, getBlocklistHealth, resetBlocklistCache } from "@/lib/security/blocklist";
+import { checkBlocklist, fetchBlocklist, getBlocklistHealth, resetBlocklistCache } from "@/lib/security/blocklist";
 
 describe("blocklist health", () => {
   beforeEach(() => {
@@ -41,8 +41,7 @@ describe("blocklist health", () => {
     process.env.FORTEXA_BLOCKLIST_URL = "https://example.com/blocklist.json";
     vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("Network error"));
 
-    const domains = await fetchBlocklist();
-    expect(domains).toEqual([]);
+    await expect(fetchBlocklist()).rejects.toThrow("Network error");
 
     const health = getBlocklistHealth();
     expect(health.configured).toBe(true);
@@ -62,8 +61,7 @@ describe("blocklist health", () => {
 
     vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("Timeout"));
 
-    const domains = await fetchBlocklist();
-    expect(domains).toEqual(["bad-actor.com"]);
+    await expect(fetchBlocklist()).rejects.toThrow("Timeout");
 
     const health = getBlocklistHealth();
     expect(health.configured).toBe(true);
@@ -78,10 +76,44 @@ describe("blocklist health", () => {
       new Response("Service Unavailable", { status: 503 })
     );
 
-    const domains = await fetchBlocklist();
-    expect(domains).toEqual([]);
+    await expect(fetchBlocklist()).rejects.toThrow("HTTP 503");
 
     const health = getBlocklistHealth();
     expect(health.lastError).toBe("HTTP 503");
+  });
+});
+
+describe("checkBlocklist", () => {
+  beforeEach(() => {
+    resetBlocklistCache();
+    process.env.FORTEXA_BLOCKLIST_URL = "https://example.com/blocklist.json";
+  });
+
+  afterEach(() => {
+    delete process.env.FORTEXA_BLOCKLIST_URL;
+    resetBlocklistCache();
+    vi.restoreAllMocks();
+  });
+
+  it("allows a domain that is not listed", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(["bad.example"]), { status: 200 }),
+    );
+    await expect(checkBlocklist("good.example")).resolves.toEqual({ allow: true, reasonCode: null });
+  });
+
+  it("denies a listed domain with BLOCKLIST_MATCH", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      new Response(JSON.stringify(["bad.example"]), { status: 200 }),
+    );
+    await expect(checkBlocklist("Bad.Example")).resolves.toEqual({
+      allow: false,
+      reasonCode: "BLOCKLIST_MATCH",
+    });
+  });
+
+  it("does not throw when the feed is unreachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("down"));
+    await expect(checkBlocklist("good.example")).resolves.toEqual({ allow: true, reasonCode: null });
   });
 });

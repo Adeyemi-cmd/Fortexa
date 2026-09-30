@@ -5,8 +5,13 @@ import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { readJsonBody } from "@/lib/http/read-json-body";
-import { getPolicyConfig, updatePolicyConfig } from "@/lib/storage/policy-store";
+import { z } from "zod";
+
+import { DuplicateRuleError, validateNoDuplicateRules } from "@/lib/policy/engine";
+import { parsePolicyImport, policyImportMatchesActive } from "@/lib/policy/import-export";
+import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
+import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -88,21 +93,94 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const parsed = policyConfigSchema.safeParse(bodyResult.data);
+    if (typeof bodyResult.data === "object" && bodyResult.data !== null &&
+        "format" in bodyResult.data) {
+      const imported = parsePolicyImport(bodyResult.data);
+      if (!imported.ok) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: { error: imported.error },
+          headers: rateLimitHeaders(rate),
+        });
+      }
 
-    if (!parsed.success) {
-      logWarn("Policy update validation failed", { ...context, userId: auth.session.userId });
+      validateNoDuplicateRules(imported.document.policy);
+      const active = await getPolicyConfig();
+      const mismatch = policyImportMatchesActive(imported.document, active);
+      if (mismatch) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: imported.document.version !== active.version ? 409 : 422,
+          body: { error: mismatch },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      // Importing an unchanged export is a round trip, not a new policy revision.
+      if (JSON.stringify(imported.document.policy) === JSON.stringify(active.policy)) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 200,
+          body: active,
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      const updated = await updatePolicyConfig(imported.document.policy, auth.session.userId, {
+        expectedVersion: imported.document.version,
+      });
       return jsonWithRequestContext(request, {
         route: "/api/policy",
         startedAtMs,
-        status: 400,
-        body: { error: "Invalid policy payload.", details: parsed.error.flatten() },
+        status: 200,
+        body: updated,
         headers: rateLimitHeaders(rate),
       });
     }
 
-    const updated = await updatePolicyConfig(parsed.data, auth.session.userId);
-    logInfo("Policy update success", { ...context, userId: auth.session.userId });
+    const parsed = policyConfigSchema.safeParse(bodyResult.data);
+
+    if (!parsed.success) {
+      logValidationFailure("Policy update validation failed", { ...context, userId: auth.session.userId }, parsed.error, bodyResult.data);
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Invalid policy payload.", details: toPublicValidationDetails(parsed.error) },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const versionMeta = z.object({
+      expectedVersion: z.number().int().positive().optional(),
+    }).safeParse(bodyResult.data);
+
+    if (!versionMeta.success) {
+      logValidationFailure("Policy update invalid expectedVersion", { ...context, userId: auth.session.userId }, versionMeta.error, bodyResult.data);
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Invalid policy payload.", details: toPublicValidationDetails(versionMeta.error) },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const { expectedVersion } = versionMeta.data;
+
+    const updated = await updatePolicyConfig(parsed.data, auth.session.userId, {
+      expectedVersion,
+    });
+    logInfo("Policy update success", {
+      ...context,
+      userId: auth.session.userId,
+      version: updated.version,
+      ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+    });
     return jsonWithRequestContext(request, {
       route: "/api/policy",
       startedAtMs,
@@ -111,6 +189,49 @@ export async function POST(request: NextRequest) {
       headers: rateLimitHeaders(rate),
     });
   } catch (error) {
+    if (error instanceof PolicyVersionConflict) {
+      logWarn("Policy update version conflict", {
+        ...context,
+        userId: auth.session.userId,
+        expectedVersion: error.expectedVersion,
+        currentVersion: error.currentVersion,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 409,
+        body: {
+          error: error.message,
+          code: "POLICY_VERSION_CONFLICT",
+          expectedVersion: error.expectedVersion,
+          currentVersion: error.currentVersion,
+          currentUpdatedAt: error.currentUpdatedAt,
+        },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (error instanceof DuplicateRuleError) {
+      logWarn("Policy update rejected: duplicate rule identifier", {
+        ...context,
+        userId: auth.session.userId,
+        field: error.field,
+        duplicateValue: error.value,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 422,
+        body: {
+          error: error.message,
+          code: "DUPLICATE_RULE_IDENTIFIER",
+          field: error.field,
+          duplicateValue: error.value,
+        },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     logError("Policy update internal error", {
       ...context,
       userId: auth.session.userId,
