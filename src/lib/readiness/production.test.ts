@@ -142,4 +142,70 @@ describe("production readiness", () => {
 
     expect(report).toBeNull();
   });
+
+  it("passes for a consistent production fixture", () => {
+    const report = checkProductionReadiness(
+      {
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      },
+      { cwd: "/srv/fortexa", appliedMigrationId: "004_wallet_expiration" }
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.issues).toEqual([]);
+  });
+
+  it("rejects testnet passphrase in production mode", () => {
+    const report = checkProductionReadiness(
+      {
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+      },
+      { cwd: "/srv/fortexa", appliedMigrationId: "004_wallet_expiration" }
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          setting: "NODE_ENV, STELLAR_NETWORK_PASSPHRASE",
+        }),
+      ])
+    );
+  });
+
+  it("rejects stale migration in production mode", () => {
+    const report = checkProductionReadiness(
+      {
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      },
+      { cwd: "/srv/fortexa", appliedMigrationId: "001_initial_storage" }
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          setting: "NODE_ENV, fortexa_schema_migrations",
+        }),
+      ])
+    );
+  });
 });

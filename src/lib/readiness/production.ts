@@ -6,6 +6,7 @@ import {
   getStellarHorizonUrl,
   inferStellarNetworkFromHorizonUrl,
 } from "@/lib/stellar/network";
+import { STORAGE_MIGRATIONS } from "@/lib/storage/migrations";
 
 const STELLAR_PUBLIC_KEY = /^G[A-Z2-7]{55}$/u;
 const MIN_AUTH_SECRET_LENGTH = 32;
@@ -23,6 +24,7 @@ export type ProductionReadinessReport = {
 
 type ProductionReadinessOptions = {
   cwd?: string;
+  appliedMigrationId?: string | null;
 };
 
 function normalizeConfiguredValue(value: string | undefined) {
@@ -211,6 +213,29 @@ export function checkProductionReadiness(
       "Shared lockout and rate-limit state is not configured.",
       "Configure REDIS_URL for multi-instance deployments or FORTEXA_SHARED_STATE_PATH for a shared file-backed state store."
     );
+  }
+
+  const hasSecureSessionCookiePolicy = env.NODE_ENV === "production";
+
+  if (hasSecureSessionCookiePolicy && networkPassphrase === STELLAR_TESTNET_NETWORK_PASSPHRASE) {
+    addIssue(
+      issues,
+      "NODE_ENV, STELLAR_NETWORK_PASSPHRASE",
+      "Deployment requires a secure session cookie but is using a testnet passphrase.",
+      "Use the Stellar public network passphrase for production deployments."
+    );
+  }
+
+  if (hasSecureSessionCookiePolicy && options.appliedMigrationId !== undefined) {
+    const expectedMigrationId = STORAGE_MIGRATIONS[STORAGE_MIGRATIONS.length - 1]?.id;
+    if (expectedMigrationId && options.appliedMigrationId !== expectedMigrationId) {
+      addIssue(
+        issues,
+        "NODE_ENV, fortexa_schema_migrations",
+        "Deployment requires a secure session cookie but the applied migration is behind the current code.",
+        "Run the database migrations to bring the schema up to date."
+      );
+    }
   }
 
   return {
