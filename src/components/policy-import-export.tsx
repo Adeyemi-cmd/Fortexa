@@ -9,6 +9,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import type { PolicyConfig } from "@/lib/types/domain";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { generatePolicyDiff, groupDiffChanges } from "@/lib/validation/diff";
+import {
+  migratePolicyDocument,
+  PolicyMigrationError,
+} from "@/lib/policy/migrations";
 
 interface PolicyImportExportProps {
   currentPolicy: PolicyConfig | null;
@@ -78,8 +82,31 @@ export function PolicyImportExport({
           return;
         }
 
+        // Run the migration chain before schema validation so the editor
+        // surfaces the same error the API/store would return.
+        let migrated: unknown;
+        try {
+          migrated = migratePolicyDocument(parsed);
+        } catch (err) {
+          if (err instanceof PolicyMigrationError) {
+            setImportState({
+              status: "error",
+              error: `Migration failed (version ${err.version}): ${err.message}`,
+            });
+            return;
+          }
+          setImportState({
+            status: "error",
+            error:
+              err instanceof Error
+                ? `Migration failed: ${err.message}`
+                : "Migration failed: unknown error",
+          });
+          return;
+        }
+
         // Validate against schema
-        const result = policyConfigSchema.safeParse(parsed);
+        const result = policyConfigSchema.safeParse(migrated);
         if (!result.success) {
           const errors = result.error.issues
             .map((e) => `${e.path.join(".") || "root"}: ${e.message}`)
@@ -130,6 +157,16 @@ export function PolicyImportExport({
     try {
       await onImportApproved(importState.policy);
       setImportState({ status: "idle" });
+    } catch (err) {
+      setImportState({
+        status: "error",
+        error:
+          err instanceof PolicyMigrationError
+            ? `Migration failed (version ${err.version}): ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : "Import failed: unknown error",
+      });
     } finally {
       setImporting(false);
     }

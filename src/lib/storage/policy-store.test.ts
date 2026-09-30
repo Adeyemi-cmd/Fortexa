@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { DuplicateRuleError } from "@/lib/policy/engine";
 import {
+  PolicyMigrationError,
   PolicyVersionConflict,
   getPolicyConfig,
   getPolicyHistory,
+  migratePolicyDocument,
   rollbackPolicyVersion,
   updatePolicyConfig,
 } from "@/lib/storage/policy-store";
+
+import currentValid from "@/lib/policy/__fixtures__/policy-current-valid.json";
+import midMigrationFailure from "@/lib/policy/__fixtures__/policy-mid-migration-failure.json";
+import unknownVersion from "@/lib/policy/__fixtures__/policy-unknown-version.json";
 
 describe("policy store versioning", () => {
   it("increments version and supports rollback", async () => {
@@ -107,7 +113,7 @@ describe("policy store versioning", () => {
         "policy-store-conflict-loser",
         { expectedVersion: baseline.version },
       ),
-    ).rejects.toBeInstanceOf(PolicyVersionConflict);
+    ).rejects.toBeInctanceOf(PolicyVersionConflict);
 
     const historyAfter = await getPolicyHistory(100);
     // +1 from the legitimate bump, no extra row for the rejected attempt.
@@ -126,10 +132,46 @@ describe("policy store versioning", () => {
         },
         "policy-store-duplicate-test",
       ),
-    ).rejects.toBeInstanceOf(DuplicateRuleError);
+    ).rejects.toBeInctanceOf(DuplicateRuleError);
 
     // Verify the policy was NOT updated by ensuring version is unchanged.
     const after = await getPolicyConfig();
     expect(after.version).toBe(current.version);
+  });
+
+  it("migratePolicyDocument accepts a current-schema document", () => {
+    const migrated = migratePolicyDocument(currentValid);
+    expect(migrated.perTxCapXLM).toBe(currentValid.perTxCapXLM);
+  });
+
+  it("migratePolicyDocument rejects an unknown version and reports it", () => {
+    let captured: unknown = null;
+    try {
+      migratePolicyDocument(unknownVersion);
+    } catch (error) {
+      captured = error;
+    }
+    expect(captured).toBeInstanceOf(PolicyMigrationError);
+    const migrationError = captured as PolicyMigrationError;
+    expect(migrationError.failingVersion).toBe(unknownVersion.schemaVersion);
+  });
+
+  it("migratePolicyDocument rejects a mid-migration failure and leaves the active policy untouched", async () => {
+    const before = await getPolicyConfig();
+
+    let captured: unknown = null;
+    try {
+      migratePolicyDocument(midMigrationFailure);
+    } catch (error) {
+      captured = error;
+    }
+
+    expect(captured).toBeInctanceOf(PolicyMigrationError);
+    const migrationError = captured as PolicyMigrationError;
+    expect(migrationError.failingVersion).toBe(midMigrationFailure.schemaVersion);
+
+    const after = await getPolicyConfig();
+    expect(after.version).toBe(before.version);
+    expect(after.policy).toEqual(before.policy);
   });
 });

@@ -5,7 +5,7 @@ import type { PolicyConfig } from "@/lib/types/domain";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 
 /**
- * Policy migration smoke-test helper.
+ * Policy migration chain.
  *
  * Goals:
  * - Verify that representative historical policy payloads still load after
@@ -15,11 +15,17 @@ import { policyConfigSchema } from "@/lib/validation/schemas";
  *   an operator can act on.
  *
  * Behavior:
- * 1. Strict-parse the candidate against `policyConfigSchema`.
- * 2. If strict-parse fails and the only issues are missing documented
+ * 1. Resolve the document's declared schema version. Unknown or future
+ *    versions are rejected outright so a newer document cannot silently
+ *    downgrade onto an older schema.
+ * 2. Strict-parse the candidate against `policyConfigSchema`.
+ * 3. If strict-parse fails and the only issues are missing documented
  *    optional fields (those with a safe default in `OPTIONAL_DEFAULTS`),
  *    fill them with the documented default and re-parse.
- * 3. If re-parse still fails, or if any non-optional / type-related issue
+ * 4. Verify that the migration did not silently change a rule type: every
+ *    field that was present in the raw document must still have the same
+ *    JS kind after migration.
+ * 5. If re-parse still fails, or if any non-optional / type-related issue
  *    is present, return a `{ ok: false, error, issues }` result describing
  *    every Zod issue.
  *
@@ -36,6 +42,19 @@ import { policyConfigSchema } from "@/lib/validation/schemas";
  * that `parseStoredPolicy` migrates it cleanly.
  */
 
+/**
+ * The current policy schema version. Bump this whenever the shape of
+ * PolicyConfig changes in a way that requires a migration step.
+ */
+export const CURRENT_POLICY_SCHEMA_VERSION = 1 as const;
+
+/**
+ * Versions this migration chain knows how to read. A document that
+ * declares a version outside this set is rejected rather than being
+ * silently coerced onto the current shape.
+ */
+export const KNOWN_POLICY_SCHEMA_VERSIONS = [1] as const;
+
 export type PolicyMigration = {
   field: string;
   reason: "missing-optional-default";
@@ -46,12 +65,15 @@ export type PolicyParseSuccess = {
   ok: true;
   policy: PolicyConfig;
   migrations: PolicyMigration[];
+  version: number;
 };
 
 export type PolicyParseFailure = {
   ok: false;
   error: string;
   issues: { path: string; message: string }[];
+  /** The version that failed to migrate, when known. */
+  version?: number | null;
 };
 
 export type PolicyParseResult = PolicyParseSuccess | PolicyParseFailure;
@@ -68,7 +90,14 @@ const OPTIONAL_DEFAULTS: Record<string, unknown> = {
   allowedHours: defaultPolicyConfig.allowedHours,
 };
 
-function formatFailure(error: z.ZodError): PolicyParseFailure {
+/**
+ * The field name that carries the schema version in an imported document.
+ * It is stripped before the document is validated against the policy
+ * schema, so it never becomes part of the persisted policy.
+ */
+const VERSION_FIELD = "schemaVersion";
+
+function formatFailure(error: z.ZodError, version?: number | null): PolicyParseFailure {
   const issues = error.issues.map((issue) => ({
     path: issue.path.map(String).join(".") || "<root>",
     message: issue.message,
@@ -82,11 +111,81 @@ function formatFailure(error: z.ZodError): PolicyParseFailure {
     ok: false,
     error: `Stored policy payload is malformed. ${summary}`,
     issues,
+    version: version ?? null,
+  };
+}
+
+function failure(error: string, version?: number | null): PolicyParseFailure {
+  return {
+    ok: false,
+    error,
+    issues: [],
+    version: version ?? null,
   };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Resolve the declared schema version from a raw document. Documents
+ * that do not declare a version are treated as version 1 (legacy
+ * payloads predate the version field).
+ */
+function resolveDeclaredVersion(raw: Record<string, unknown>): number | null {
+  const declared = raw[VERSION_FIELD];
+  if (declared === undefined) {
+    return 1;
+  }
+  if (typeof declared !== "number" || !Number.isInteger(declared)) {
+    return null;
+  }
+  return declared;
+}
+
+function stripVersionField(raw: Record<string, unknown>): Record<string, unknown> {
+  const { [VERSION_FIELD]: _,
+  ...rest } = raw;
+  return rest;
+}
+
+/**
+ * JS kind of a value, used to detect silent rule-type changes during
+ * migration. Null and array are distinguished from `object` so a field
+ * that flips from a scalar to a collection (or vice versa) is caught.
+ */
+function jsKind(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+/**
+ * Detect fields whose JS kind changed between the raw document and the
+ * migrated/parsed output. This guards against a migration that
+ * silently rewrites a rule from one type to another (e.g. a scalar cap
+ * becoming an array), which would change live payment decisions.
+ */
+function findTypeChanges(
+  raw: Record<string, unknown>,
+  parsed: Record<string, unknown>,
+): { path: string; message: string }[] {
+  const changes: { path: string; message: string }[] = [];
+
+  for (const key of Object.keys(raw)) {
+    if (!(key in parsed)) continue;
+    const before = jsKind(raw[key]);
+    const after = jsKind(parsed[key]);
+    if (before !== after) {
+      changes.push({
+        path: key,
+        message: `migration changed rule type from ${before} to ${after}`,
+      });
+    }
+  }
+
+  return changes;
 }
 
 /**
@@ -111,13 +210,45 @@ function findMigratableFields(
 }
 
 export function parseStoredPolicy(raw: unknown): PolicyParseResult {
-  const strict = policyConfigSchema.safeParse(raw);
-  if (strict.success) {
-    return { ok: true, policy: strict.data, migrations: [] };
+  if (!isPlainObject(raw)) {
+    const strict = policyConfigSchema.safeParse(raw);
+    if (strict.success) {
+      return {
+        ok: true,
+        policy: strict.data,
+        migrations: [],
+        version: CURRENT_POLICY_SCHEMA_VERSION,
+      };
+    }
+    return formatFailure(strict.error, null);
   }
 
-  if (!isPlainObject(raw)) {
-    return formatFailure(strict.error);
+  // Reject unknown / future versions before attempting any migration.
+  const declaredVersion = resolveDeclaredVersion(raw);
+  if (declaredVersion === null) {
+    return failure(
+      `Policy document declares an invalid ${VERSION_FIELD}; expected an integer.`,
+      null,
+    );
+  }
+
+  if (!(KNOWN_POLICY_SCHEMA_VERSIONS as readonly number[]).includes(declaredVersion)) {
+    return failure(
+      `Unknown policy schema version ${declaredVersion}. Supported versions: ${KNOWN_POLICY_SCHEMA_VERSIONS.join(", ")}.`,
+      declaredVersion,
+    );
+  }
+
+  const stripped = stripVersionField(raw);
+
+  const strict = policyConfigSchema.safeParse(stripped);
+  if (strict.success) {
+    return {
+      ok: true,
+      policy: strict.data,
+      migrations: [],
+      version: declaredVersion,
+    };
   }
 
   const issuePaths = new Set(
@@ -127,12 +258,12 @@ export function parseStoredPolicy(raw: unknown): PolicyParseResult {
     }),
   );
 
-  const migratableFields = findMigratableFields(raw, issuePaths);
+  const migratableFields = findMigratableFields(stripped, issuePaths);
   if (!migratableFields) {
-    return formatFailure(strict.error);
+    return formatFailure(strict.error, declaredVersion);
   }
 
-  const attempted: Record<string, unknown> = { ...raw };
+  const attempted: Record<string, unknown> = { ...stripped };
   const migrations: PolicyMigration[] = [];
 
   for (const field of migratableFields) {
@@ -145,9 +276,31 @@ export function parseStoredPolicy(raw: unknown): PolicyParseResult {
   }
 
   const migrated = policyConfigSchema.safeParse(attempted);
-  if (migrated.success) {
-    return { ok: true, policy: migrated.data, migrations };
+  if (!migrated.success) {
+    return formatFailure(migrated.error, declaredVersion);
   }
 
-  return formatFailure(migrated.error);
+  // Guard against a migration that silently changed a rule type.
+  const typeChanges = findTypeChanges(
+    stripped,
+    migrated.data as unknown as Record<string, unknown>,
+  );
+  if (typeChanges.length > 0) {
+    const summary = typeChanges
+      .map((change) => `${change.path}: ${change.message}`)
+      .join("; ");
+    return {
+      ok: false,
+      error: `Policy migration changed a rule type. ${summary}`,
+      issues: typeChanges,
+      version: declaredVersion,
+    };
+  }
+
+  return {
+    ok: true,
+    policy: migrated.data,
+    migrations,
+    version: declaredVersion,
+  };
 }
