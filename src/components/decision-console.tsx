@@ -140,6 +140,7 @@ export function DecisionConsole() {
 
   useEffect(() => {
     if (step === 4 && evaluatedAmount != null && !executeAmount) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the prefill of a user-editable amount field
       setExecuteAmount(String(evaluatedAmount));
     }
   }, [step, evaluatedAmount, executeAmount]);

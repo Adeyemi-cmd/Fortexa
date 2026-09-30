@@ -39,6 +39,7 @@ export function WalletStatusCard({ compact = false }: { compact?: boolean }) {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial balance fetch on mount
     void loadWallet();
   }, []);
 
