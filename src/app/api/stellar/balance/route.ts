@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
-import { isAddressBlocklisted } from "@/lib/security/blocklist";
+import { checkBlocklist } from "@/lib/security/blocklist";
 import { getNativeBalance } from "@/lib/stellar/client";
 import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 
@@ -61,7 +61,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  if (await isAddressBlocklisted(publicKey)) {
+  if (!(await checkBlocklist(publicKey)).allow) {
     return NextResponse.json(
       { error: "Wallet address is blocklisted." },
       { status: 403 }

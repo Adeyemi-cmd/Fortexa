@@ -4,7 +4,20 @@ import type {
   SecurityEvaluation,
   SecurityFinding,
 } from "@/lib/types/domain";
-import { fetchBlocklist, getBlocklistHealth } from "@/lib/security/blocklist";
+import {
+  fetchBlocklist,
+  getBlocklistHealth,
+} from "@/lib/security/blocklist";
+
+/** Configuration for analyzer timeout behavior. */
+export interface AnalyzerConfig {
+  blocklistTimeoutMs: number;
+}
+
+/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
+export const defaultAnalyzerConfig: AnalyzerConfig = {
+  blocklistTimeoutMs: 5000,
+};
 
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
@@ -135,8 +148,9 @@ function blocklistCheck(
 }
 
 /**
- * Fetch blocklist with timeout support. Returns findings if successful, empty array if blocked/timed out/failed.
- * Returns status indicating what happened.
+ * Fetch the blocklist and report whether the feed was reachable.
+ * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
+ * failure we fall back to an empty list and report the degraded status.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
@@ -146,15 +160,15 @@ async function fetchBlocklistWithTimeout(): Promise<{
     const blocklist = await fetchBlocklist();
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : getBlocklistHealth().lastError ?? "Blocklist fetch failed";
-    const isTimeout =
-      (err instanceof Error && err.name === "AbortError") ||
-      /abort|timeout/i.test(message);
-    return {
-      blocklist: [],
-      status: { blocked: true, timedOut: isTimeout, error: message },
-    };
+    const health = getBlocklistHealth();
+    const error =
+      health.lastError ??
+      (err instanceof Error ? err.message : "Unknown fetch error");
+    const timedOut =
+      (err instanceof Error &&
+        (err.name === "AbortError" || err.name === "TimeoutError")) ||
+      /abort|timed? ?out/i.test(error);
+    return { blocklist: [], status: { blocked: true, timedOut, error } };
   }
 }
 

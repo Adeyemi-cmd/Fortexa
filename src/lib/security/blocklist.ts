@@ -80,18 +80,27 @@ export function resetBlocklistCache(): void {
   lastErrorSummary = null;
 }
 
+export type BlocklistVerdict =
+  | { allow: true; reasonCode: null }
+  | { allow: false; reasonCode: "BLOCKLIST_MATCH" };
+
 /**
- * Returns true when a Stellar address appears in the external blocklist.
- * Fail-open on feed errors, matching the analyzer: an unreachable feed must
- * not take payment routes down, and feed health is reported via /api/health.
+ * Check a destination domain against the blocklist. On a failed refresh the
+ * last cached list is still consulted so a known-bad domain is never allowed
+ * just because the feed is unreachable.
  */
-export async function isAddressBlocklisted(address: string): Promise<boolean> {
+export async function checkBlocklist(domain: string): Promise<BlocklistVerdict> {
   let domains: string[];
   try {
     domains = await fetchBlocklist();
   } catch {
-    return false;
+    domains = cachedDomains;
   }
-  const needle = address.trim().toUpperCase();
-  return domains.some((entry) => entry.trim().toUpperCase() === needle);
+
+  const normalized = domain.trim().toLowerCase();
+  const listed = domains.some((entry) => entry.trim().toLowerCase() === normalized);
+
+  return listed
+    ? { allow: false, reasonCode: "BLOCKLIST_MATCH" }
+    : { allow: true, reasonCode: null };
 }

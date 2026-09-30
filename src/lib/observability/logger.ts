@@ -4,7 +4,7 @@ import { redactSensitiveFields } from "@/lib/observability/redact";
 
 type LogLevel = "info" | "warn" | "error";
 
-export type LogContext = {
+type LogContext = {
   requestId?: string;
   route?: string;
   method?: string;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { isAddressBlocklisted } from "@/lib/security/blocklist";
+import { checkBlocklist } from "@/lib/security/blocklist";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
 
     const payload = parsedPayload.data;
 
-    if (await isAddressBlocklisted(payload.destination)) {
+    if (!(await checkBlocklist(payload.destination)).allow) {
       return NextResponse.json(
         { error: "Destination is blocklisted." },
         { status: 403, headers: rateLimitHeaders(rate) }

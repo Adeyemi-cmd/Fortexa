@@ -13,7 +13,7 @@ const stellar = vi.hoisted(() => ({
   buildUnsignedPaymentTransaction: vi.fn(),
   submitSignedTransactionXdr: vi.fn(),
 }));
-const blocklist = vi.hoisted(() => ({ isAddressBlocklisted: vi.fn() }));
+const blocklist = vi.hoisted(() => ({ checkBlocklist: vi.fn() }));
 
 vi.mock("@/lib/stellar/client", () => stellar);
 vi.mock("@/lib/security/blocklist", () => blocklist);
@@ -60,7 +60,7 @@ function expectStellarUntouched() {
 describe("stellar balance/fund/pay decision gate", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
-    blocklist.isAddressBlocklisted.mockResolvedValue(false);
+    blocklist.checkBlocklist.mockResolvedValue({ allow: true, reasonCode: null });
     await upsertUserWallet("gate-user", { publicKey: wallet, source: "external", provider: "freighter" });
   });
 
@@ -69,12 +69,12 @@ describe("stellar balance/fund/pay decision gate", () => {
     const f = await fundPost(req("http://x/api/stellar/fund", "POST", {}, false));
     const p = await payPost(req("http://x/api/stellar/pay", "POST", payBody, false));
     expect([b.status, f.status, p.status]).toEqual([401, 401, 401]);
-    expect(blocklist.isAddressBlocklisted).not.toHaveBeenCalled();
+    expect(blocklist.checkBlocklist).not.toHaveBeenCalled();
     expectStellarUntouched();
   });
 
   it("rejects blocklisted destinations on all routes", async () => {
-    blocklist.isAddressBlocklisted.mockResolvedValue(true);
+    blocklist.checkBlocklist.mockResolvedValue({ allow: false, reasonCode: "BLOCKLIST_MATCH" });
     const b = await balanceGet(req("http://x/api/stellar/balance", "GET"));
     const f = await fundPost(req("http://x/api/stellar/fund", "POST", { destination }));
     const p = await payPost(req("http://x/api/stellar/pay", "POST", payBody));

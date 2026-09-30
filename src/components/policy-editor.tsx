@@ -11,6 +11,7 @@ import { useAuthSession } from "@/lib/auth/use-auth-session";
 import type { SimulationReport, SimulationSource } from "@/lib/decision/simulate";
 import type { DecisionType, PolicyConfig } from "@/lib/types/domain";
 import { PolicyImportExport } from "@/components/policy-import-export";
+import type { PolicyExport } from "@/lib/policy/import-export";
 
 type PolicyResponse = {
   policy?: PolicyConfig;
@@ -236,6 +237,10 @@ export function PolicyEditor() {
       }
 
       setPolicy(payload.policy);
+      setAllowedDomains(listToText(payload.policy.allowedDomains));
+      setBlockedDomains(listToText(payload.policy.blockedDomains));
+      setAllowedTools(listToText(payload.policy.allowedTools));
+      setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
       setStatus("Policy updated successfully.");
@@ -404,10 +409,9 @@ export function PolicyEditor() {
     }
   }
 
-  async function handleImportPolicy(importedPolicy: PolicyConfig) {
+  async function handleImportPolicy(document: PolicyExport) {
     if (!isOperator) {
-      setStatus("Viewer role is read-only. Login as operator to import policy.");
-      return;
+      throw new Error("Viewer role is read-only. Login as operator to import policy.");
     }
 
     setLoading(true);
@@ -415,14 +419,13 @@ export function PolicyEditor() {
       const response = await fetch("/api/policy", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(importedPolicy),
+        body: JSON.stringify(document),
       });
 
       const payload = (await response.json()) as PolicyResponse;
 
       if (!response.ok || payload.error || !payload.policy) {
-        setStatus(payload.error ?? "Failed to save imported policy.");
-        return;
+        throw new Error(payload.error ?? "Failed to save imported policy.");
       }
 
       setPolicy(payload.policy);
@@ -432,10 +435,11 @@ export function PolicyEditor() {
       setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
-      setStatus("Policy imported and saved successfully.");
+      setStatus("Policy imported successfully.");
       await loadHistory();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected import error.");
+      throw error;
     } finally {
       setLoading(false);
     }
@@ -571,6 +575,7 @@ export function PolicyEditor() {
 
         <PolicyImportExport
           currentPolicy={policy}
+          currentVersion={version}
           onImportApproved={handleImportPolicy}
           isOperator={isOperator}
           isLoading={loading || sessionLoading}

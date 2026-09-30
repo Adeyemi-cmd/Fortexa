@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireActiveAuth } from "@/lib/auth/require-auth";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logInfo, logWarn } from "@/lib/observability/logger";
@@ -8,7 +8,8 @@ import { getRequestLogContext, logInfo, logWarn } from "@/lib/observability/logg
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/auth/refresh");
-  const auth = requireAuth(request);
+  // A logged-out session must not be able to mint a new generation.
+  const auth = await requireActiveAuth(request);
 
   if (!auth.ok) {
     logWarn("Auth refresh unauthorized", context);
@@ -19,6 +20,7 @@ export async function POST(request: NextRequest) {
     email: auth.session.email,
     role: auth.session.role,
     userId: auth.session.userId,
+    sessionId: auth.session.sid,
   });
 
   const response = jsonWithRequestContext(request, {

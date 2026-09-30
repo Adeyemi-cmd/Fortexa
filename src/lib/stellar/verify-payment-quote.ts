@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { validateRequestTimestamp } from "@/lib/stellar/request-timestamp-skew";
 import {
   parseXlmNumberToStroops,
@@ -53,7 +55,8 @@ const PAYMENT_AMOUNT_DECIMAL_PLACES = 7;
 export const PAYMENT_AMOUNT_ERROR =
   "amountXLM must be a positive finite XLM amount with up to 7 decimals.";
 
-const MAX_PAYMENT_AMOUNT_STROOPS = BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_XLM;
+const MAX_PAYMENT_AMOUNT_STROOPS =
+  BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_XLM;
 
 /**
  * Reads an authorized amount as an exact stroop count, or `null` if it is not
@@ -63,7 +66,9 @@ const MAX_PAYMENT_AMOUNT_STROOPS = BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_
  */
 function toAuthorizedStroops(amount: number | string): bigint | null {
   const parsed =
-    typeof amount === "number" ? parseXlmNumberToStroops(amount) : parseXlmToStroops(amount);
+    typeof amount === "number"
+      ? parseXlmNumberToStroops(amount)
+      : parseXlmToStroops(amount);
 
   if (!parsed.ok) {
     return null;
@@ -133,6 +138,29 @@ export function normalizeAmountXLM(amount: number | string): string {
   return stroopsToXlmString(stroops);
 }
 
+export function buildDecisionReceipt(input: {
+  destination: string;
+  amountXLM: number | string;
+  asset?: StellarAssetId;
+  memo?: string;
+  network?: StellarNetworkId;
+}): PaymentQuote {
+  const normalized = {
+    destination: input.destination.trim().toUpperCase(),
+    amountXLM: normalizeAmountXLM(input.amountXLM),
+    asset: input.asset ?? "native",
+    memo: (input.memo ?? "").slice(0, 28),
+    network: input.network ?? "testnet",
+  };
+
+  return {
+    ...normalized,
+    receiptHash: createHash("sha256")
+      .update(JSON.stringify(normalized, Object.keys(normalized).sort()))
+      .digest("hex"),
+  };
+}
+
 export function buildPaymentQuoteFromDecision(input: {
   destination: string;
   amountXLM: number;
@@ -140,13 +168,68 @@ export function buildPaymentQuoteFromDecision(input: {
   actionId: string;
   network?: StellarNetworkId;
 }): PaymentQuote {
-  return {
-    destination: input.destination.trim().toUpperCase(),
-    amountXLM: normalizeAmountXLM(input.amountXLM),
-    asset: "native",
-    memo: (input.memo ?? `fortexa:${input.actionId}`).slice(0, 28),
-    network: input.network ?? "testnet",
-  };
+  return buildDecisionReceipt({
+    destination: input.destination,
+    amountXLM: input.amountXLM,
+    memo: input.memo ?? `fortexa:${input.actionId}`,
+    network: input.network,
+  });
+}
+
+export function validateDecisionReceipt(
+  receipt: PaymentQuote,
+):
+  | { ok: true; normalized: PaymentQuote }
+  | { ok: false; error: string; field?: PaymentQuoteField } {
+  if (
+    !receipt?.destination ||
+    !receipt?.amountXLM ||
+    !receipt?.asset ||
+    !receipt?.memo ||
+    !receipt?.network
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Payment decision receipt is missing required fields.",
+      field: "memo",
+    } as any;
+  }
+
+  try {
+    const normalized = {
+      destination: receipt.destination.trim().toUpperCase(),
+      amountXLM: normalizeAmountXLM(receipt.amountXLM),
+      asset: receipt.asset,
+      memo: receipt.memo.slice(0, 28),
+      network: receipt.network,
+    };
+
+    const expectedHash = createHash("sha256")
+      .update(JSON.stringify(normalized, Object.keys(normalized).sort()))
+      .digest("hex");
+
+    if (receipt.receiptHash && receipt.receiptHash !== expectedHash) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Payment decision receipt is corrupted or tampered.",
+        field: "amountXLM",
+      } as any;
+    }
+
+    return {
+      ok: true,
+      normalized: { ...normalized, receiptHash: expectedHash },
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      error: PAYMENT_AMOUNT_ERROR,
+      field: "amountXLM",
+    } as any;
+  }
 }
 
 export function verifyPaymentAgainstQuote(
@@ -256,6 +339,15 @@ export function verifyPaymentAgainstQuote(
       ok: false,
       status: 403,
       error: "Memo does not match the authorized payment quote.",
+      field: "memo",
+    };
+  }
+
+  if (!quote.memo || quote.memo.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Memo is required for this payment destination.",
       field: "memo",
     };
   }
