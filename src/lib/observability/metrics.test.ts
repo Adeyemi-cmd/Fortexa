@@ -179,11 +179,11 @@ describe("observability metrics", () => {
       recordDecisionOutcome("G" + "A".repeat(55));
       // @ts-expect-error freetext injection
       recordDecisionOutcome("APPROVE; wallet=G123");
-      // @ts-expect-error
+      // @ts-expect-error testing runtime guard for non-enum outcome
       recordDecisionOutcome("free-text");
-      // @ts-expect-error
+      // @ts-expect-error testing runtime guard for non-enum result
       recordStellarSubmitResult("wallet_leak_payload");
-      // @ts-expect-error
+      // @ts-expect-error testing runtime guard for non-enum result
       recordStellarSubmitResult("G12345");
 
       expect(getDecisionOutcomeCounts().size).toBe(0);
@@ -203,9 +203,9 @@ describe("observability metrics", () => {
       recordApiMetric({ route: wallet, method: "POST", statusCode: 200, durationMs: 10 });
       recordApiMetric({ route: `/api/decision?wallet=${wallet}`, method: "POST", statusCode: 200, durationMs: 10 });
       // Also try to inject via outcome/result with wallet-like string (should be dropped)
-      // @ts-expect-error
+      // @ts-expect-error wallet-like outcome is rejected by the runtime guard
       recordDecisionOutcome(wallet);
-      // @ts-expect-error
+      // @ts-expect-error wallet-like result is rejected by the runtime guard
       recordStellarSubmitResult(wallet);
 
       const output = toPrometheusText();

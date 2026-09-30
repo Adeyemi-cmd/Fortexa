@@ -10,25 +10,6 @@ import {
 } from "@/lib/security/blocklist";
 
 /** Configuration for analyzer timeout behavior. */
-export interface AnalyzerConfig {
-  blocklistTimeoutMs: number;
-}
-
-/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
-export const defaultAnalyzerConfig: AnalyzerConfig = {
-  blocklistTimeoutMs: 5000,
-};
-
-/** Get analyzer config from environment or use defaults. */
-function getAnalyzerConfig(): AnalyzerConfig {
-  return {
-    blocklistTimeoutMs: parseInt(
-      process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS || "5000",
-      10,
-    ),
-  };
-}
-
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
   /send\s+funds\s+to/i,
@@ -165,43 +146,26 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  let blocklist: string[] = [];
+  let fetchError: string | null = null;
+
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const blocklist = await fetchBlocklist();
-      clearTimeout(timeoutId);
-      const health = getBlocklistHealth();
-      if (health.lastError) {
-        return {
-          blocklist,
-          status: {
-            blocked: true,
-            timedOut: false,
-            error: health.lastError,
-          },
-        };
-      }
-      return { blocklist, status: { blocked: false, timedOut: false } };
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    blocklist = await fetchBlocklist();
   } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "AbortError";
+    // fetchBlocklist records the failure in its health summary, then rethrows.
+    fetchError = err instanceof Error ? err.message : "Unknown fetch error";
+  }
 
-  // fetchBlocklist swallows errors internally, so check health for failures
+  // Prefer the health summary so timeout vs generic failure classification
+  // stays in one place (the blocklist fetch applies its own timeout).
   const health = getBlocklistHealth();
-  if (health.configured && health.lastError) {
-    const isTimeout =
-      /abort|timeout/i.test(health.lastError);
+  const error = fetchError ?? health.lastError;
+
+  if (health.configured && error) {
+    const isTimeout = /abort|timeout/i.test(error);
     return {
       blocklist,
-      status: {
-        blocked: true,
-        timedOut: isTimeout,
-        error: health.lastError,
-      },
+      status: { blocked: true, timedOut: isTimeout, error },
     };
   }
 
@@ -229,7 +193,7 @@ export async function evaluateSecurity(
     await fetchBlocklistWithTimeout();
 
   if (blocklistFetchStatus.timedOut) {
-    analyzerStatus.blocklistStatus = "error";
+    analyzerStatus.blocklistStatus = "timeout";
     analyzerStatus.blocklistTimedOut = true;
     analyzerStatus.blocklistError =
       blocklistFetchStatus.error ?? "Blocklist fetch timed out";

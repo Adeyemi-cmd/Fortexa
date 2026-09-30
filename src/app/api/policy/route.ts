@@ -7,7 +7,7 @@ import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { z } from "zod";
 
-import { DuplicateRuleError } from "@/lib/policy/engine";
+import { DuplicateRuleError, validateNoDuplicateRules } from "@/lib/policy/engine";
 import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
@@ -103,6 +103,35 @@ export async function POST(request: NextRequest) {
         body: { error: "Invalid policy payload.", details: toPublicValidationDetails(parsed.error) },
         headers: rateLimitHeaders(rate),
       });
+    }
+
+    // A client can bypass the editor and POST here directly, so run the same
+    // rule-level check the validate route runs. A document the validate route
+    // rejects must never activate through this route either.
+    try {
+      validateNoDuplicateRules(parsed.data);
+    } catch (error) {
+      if (error instanceof DuplicateRuleError) {
+        logWarn("Policy update rejected: duplicate rule identifier", {
+          ...context,
+          userId: auth.session.userId,
+          field: error.field,
+          duplicateValue: error.value,
+        });
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: {
+            error: error.message,
+            code: "DUPLICATE_RULE_IDENTIFIER",
+            field: error.field,
+            duplicateValue: error.value,
+          },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+      throw error;
     }
 
     const versionMeta = z.object({

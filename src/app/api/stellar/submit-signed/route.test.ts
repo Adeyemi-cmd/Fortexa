@@ -1,5 +1,5 @@
 import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "./route";
@@ -68,7 +68,7 @@ vi.mock("@/lib/stellar/network-config", () => ({
 }));
 
 vi.mock("@/lib/stellar/client", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("@/lib/stellar/client")>();
   return {
     ...actual,
     submitSignedTransactionXdr: vi.fn(async () => ({
