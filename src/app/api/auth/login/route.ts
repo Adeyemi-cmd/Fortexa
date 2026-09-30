@@ -151,6 +151,7 @@ export async function POST(request: NextRequest) {
       email: `wallet:${normalizedWallet}`,
       role,
       userId,
+      publicKey: normalizedWallet,
     });
 
     const response = jsonWithRequestContext(request, {

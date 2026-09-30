@@ -9,6 +9,7 @@ export type AuthSession = {
   email: string;
   role: AuthRole;
   exp: number;
+  publicKey?: string;
 };
 
 export const AUTH_COOKIE_KEY = "fortexa_session";
@@ -35,13 +36,14 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number }) {
+export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number; publicKey?: string }) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
     exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
+    publicKey: input.publicKey,
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));

@@ -7,7 +7,7 @@ import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observab
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr } from "@/lib/stellar/client";
+import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr, verifySignedXdrSigner } from "@/lib/stellar/client";
 import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
 import {
   getIdempotencyRecord,
@@ -185,6 +185,18 @@ export async function POST(request: NextRequest) {
 
     const payload = parsedPayload.data;
 
+    const sessionWallet = auth.session.publicKey;
+    if (!sessionWallet) {
+      logWarn("Submit signed missing session wallet key", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 401,
+        body: { error: "Session missing wallet key." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     const assignedWallet = await getUserWallet(userId);
 
     if (assignedWallet && "expired" in assignedWallet) {
@@ -222,20 +234,38 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (xdrSourceResult.sourceAccount !== assignedWallet.publicKey) {
+    if (xdrSourceResult.sourceAccount !== sessionWallet) {
       logWarn("Submit signed source wallet mismatch", {
         ...context,
         userId,
-        expectedWallet: assignedWallet.publicKey,
+        expectedWallet: sessionWallet,
         actualSource: xdrSourceResult.sourceAccount,
       });
       recordStellarSubmitResult("source_wallet_mismatch");
       return jsonWithRequestContext(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
-        status: 400,
+        status: 403,
         body: {
           error: "Signed transaction source account does not match your session wallet.",
+        },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (!verifySignedXdrSigner(payload.signedXdr, sessionWallet)) {
+      logWarn("Submit signed signer wallet mismatch", {
+        ...context,
+        userId,
+        expectedWallet: sessionWallet,
+      });
+      recordStellarSubmitResult("signer_wallet_mismatch");
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: {
+          error: "Signed transaction signer does not match your session wallet.",
         },
         headers: rateLimitHeaders(rate),
       });

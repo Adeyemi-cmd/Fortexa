@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { POST } from "@/app/api/auth/refresh/route";
+import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
 
 function operatorCookie() {
   process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
@@ -10,6 +11,7 @@ function operatorCookie() {
     email: "operator@fortexa.local",
     role: "operator",
     userId: "refresh-operator",
+    publicKey: "GCDEFAULTTESTWALLET123",
     expiresInSeconds: 120,
   });
 
@@ -25,6 +27,7 @@ describe("/api/auth/refresh route", () => {
   });
 
   it("returns 200 and rotates for authenticated user", async () => {
+    await upsertUserWallet("refresh-operator", { publicKey: "GCDEFAULTTESTWALLET123", source: "external" });
     const request = new NextRequest("http://localhost/api/auth/refresh", {
       method: "POST",
       headers: { cookie: operatorCookie() },
