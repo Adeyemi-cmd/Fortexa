@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSessionFromRequest } from "@/lib/auth/session";
+import { getActiveSessionFromRequest } from "@/lib/auth/session-revocation";
 
 export async function GET(request: NextRequest) {
-  const session = getSessionFromRequest(request);
+  const session = await getActiveSessionFromRequest(request);
 
   if (!session) {
     return NextResponse.json({ authenticated: false }, { status: 200 });
