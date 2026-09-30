@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Keypair } from "@stellar/stellar-sdk";
 
+import {
+  checkLoginLockout,
+  recordLoginFailure,
+} from "@/lib/auth/login-lockout";
 import { normalizeWalletPublicKey } from "@/lib/auth/wallet-role";
 import {
   clearSharedChallenges,
@@ -68,7 +72,7 @@ function getChallengeTtlSeconds() {
   return Math.floor(parsed);
 }
 
-export function buildChallengeMessage(input: {
+export function buildChallengeMessage(input: {}
   challengeId: string;
   publicKey: string;
   expiresAtMs: number;
@@ -169,7 +173,7 @@ export async function createWalletChallenge(publicKey: string): Promise<WalletCh
 
 export type ChallengeVerificationResult =
   | { ok: true; challenge: WalletChallengeRecord }
-  | { ok: false; code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature" };
+  | { ok: false; code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature" | "locked" };
 
 export async function verifyWalletChallenge(input: {
   challengeId: string;
@@ -198,11 +202,23 @@ export async function verifyWalletChallenge(input: {
       return { ok: false, code: "replayed" };
     }
 
+    // Lockout is checked before any session is created. The challenge is
+    // consumed and a failure recorded against the user id so a lock survives
+    // refresh and a second wallet login.
+    const lockout = await checkLoginLockout(normalizedKey);
+    if (lockout.locked) {
+      challenge.consumed = true;
+      await writeChallenge(challenge);
+      await recordLoginFailure(normalizedKey);
+      return { ok: false, code: "locked" };
+    }
+
     const signatureValid = verifyWalletSignature(normalizedKey, challenge.message, input.signature);
     challenge.consumed = true;
     await writeChallenge(challenge);
 
     if (!signatureValid) {
+      await recordLoginFailure(normalizedKey);
       return { ok: false, code: "invalid_signature" };
     }
 
