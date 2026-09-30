@@ -109,9 +109,10 @@ export async function POST(request: NextRequest) {
       await consumeUsage(userId, action.amountXLM);
     }
 
+    const decisionNowMs = Date.now();
     const auditEntry: AuditEntry = {
       id: randomUUID(),
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(decisionNowMs).toISOString(),
       action,
       decision: finalDecision,
       explanation,
@@ -130,6 +131,7 @@ export async function POST(request: NextRequest) {
               memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
               actionId: action.id,
               network: (body.paymentQuote || body.paymentQuoteInput)!.network,
+              nowMs: decisionNowMs,
             }),
           }
         : {}),

@@ -8,7 +8,11 @@ import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr } from "@/lib/stellar/client";
+import { assertStellarNetworkConfig } from "@/lib/stellar/network-config";
 import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
+import { getTransactionHash, verifyBuildAuthorization } from "@/lib/stellar/payment-build-authorization";
+import { isPaymentDecisionCurrent } from "@/lib/stellar/verify-payment-quote";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
 import {
   getIdempotencyRecord,
   hashSignedXdr,
@@ -241,6 +245,36 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const auditEntry = await getAuditEntryById(userId, payload.decisionId);
+    if (!isPaymentDecisionCurrent(auditEntry, payload.decisionId, payload.quoteExpiresAt)) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Payment decision or quote is no longer valid. Please re-evaluate the action." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const transactionHash = getTransactionHash(
+      payload.signedXdr,
+      assertStellarNetworkConfig().networkPassphrase,
+    );
+    if (!verifyBuildAuthorization(payload.buildAuthorization, {
+      userId,
+      decisionId: payload.decisionId,
+      quoteExpiresAt: payload.quoteExpiresAt,
+      transactionHash,
+    })) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction does not match the authorized payment build." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     const headerKey = request.headers.get("idempotency-key")?.trim();
     const bodyKey = payload.idempotencyKey?.trim();
     const mergedIdempotencyKey =
@@ -292,6 +326,19 @@ export async function POST(request: NextRequest) {
           headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "false" },
         });
       }
+    }
+
+    // The idempotency lookup can take time; check the persisted authorization
+    // again at the last point before the external submission.
+    const currentDecision = await getAuditEntryById(userId, payload.decisionId);
+    if (!isPaymentDecisionCurrent(currentDecision, payload.decisionId, payload.quoteExpiresAt)) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Payment decision or quote is no longer valid. Please re-evaluate the action." },
+        headers: rateLimitHeaders(rate),
+      });
     }
 
     const submitted = await submitSignedTransactionXdr(payload.signedXdr);

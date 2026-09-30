@@ -103,7 +103,7 @@ const DEFAULT_QUOTE_TTL_SECONDS = 300;
  * Reads FORTEXA_PAYMENT_QUOTE_TTL_SECONDS; falls back to 300 s when the
  * value is absent, non-numeric, or less than 1.
  */
-function getQuoteTtlMs(): number {
+export function getQuoteTtlMs(): number {
   const parsed = Number(
     process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS ?? DEFAULT_QUOTE_TTL_SECONDS,
   );
@@ -139,6 +139,7 @@ export function buildPaymentQuoteFromDecision(input: {
   memo?: string;
   actionId: string;
   network?: StellarNetworkId;
+  nowMs?: number;
 }): PaymentQuote {
   return {
     destination: input.destination.trim().toUpperCase(),
@@ -146,12 +147,34 @@ export function buildPaymentQuoteFromDecision(input: {
     asset: "native",
     memo: (input.memo ?? `fortexa:${input.actionId}`).slice(0, 28),
     network: input.network ?? "testnet",
+    expiresAt: new Date((input.nowMs ?? Date.now()) + getQuoteTtlMs()).toISOString(),
   };
+}
+
+export function getQuoteExpiresAt(auditEntry: AuditEntry): string {
+  if (auditEntry.paymentQuote?.expiresAt) return auditEntry.paymentQuote.expiresAt;
+  const legacyExpiryMs = Date.parse(auditEntry.timestamp) + getQuoteTtlMs();
+  return Number.isFinite(legacyExpiryMs) ? new Date(legacyExpiryMs).toISOString() : "";
+}
+
+/** Rechecks the persisted decision and its original expiry at submission time. */
+export function isPaymentDecisionCurrent(
+  auditEntry: AuditEntry | undefined,
+  decisionId: string,
+  quoteExpiresAt: string,
+  nowMs = Date.now(),
+): boolean {
+  if (!auditEntry?.paymentQuote || auditEntry.id !== decisionId ||
+      !EXECUTABLE_DECISIONS.has(auditEntry.decision)) return false;
+  const storedExpiry = getQuoteExpiresAt(auditEntry);
+  const expiryMs = Date.parse(storedExpiry);
+  return storedExpiry === quoteExpiresAt && Number.isFinite(expiryMs) && nowMs < expiryMs;
 }
 
 export function verifyPaymentAgainstQuote(
   auditEntry: AuditEntry | undefined,
   request: PaymentBuildParams,
+  nowMs = Date.now(),
 ): VerifyPaymentQuoteResult {
   if (!auditEntry) {
     return {
@@ -170,7 +193,7 @@ export function verifyPaymentAgainstQuote(
   }
 
   if (request.requestTimestampMs !== undefined) {
-    const skewResult = validateRequestTimestamp(request.requestTimestampMs);
+    const skewResult = validateRequestTimestamp(request.requestTimestampMs, { nowMs });
     if (!skewResult.ok) {
       const reason =
         skewResult.code === "stale"
@@ -187,7 +210,8 @@ export function verifyPaymentAgainstQuote(
     }
   }
 
-  if (Date.now() - Date.parse(auditEntry.timestamp) > getQuoteTtlMs()) {
+  const expiresAtMs = Date.parse(getQuoteExpiresAt(auditEntry));
+  if (!Number.isFinite(expiresAtMs) || nowMs >= expiresAtMs) {
     return {
       ok: false,
       status: 403,

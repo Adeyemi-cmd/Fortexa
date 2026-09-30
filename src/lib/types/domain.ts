@@ -112,6 +112,8 @@ export interface PaymentQuote {
   asset: StellarAssetId;
   memo: string;
   network: StellarNetworkId;
+  /** Fixed at the time of the decision, rather than extended by later steps. */
+  expiresAt?: string;
 }
 
 export interface AuditEntry {

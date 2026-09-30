@@ -109,6 +109,9 @@ export const stellarBuildPaymentRequestSchema = z.object({
 
 export const stellarSubmitSignedRequestSchema = z.object({
   signedXdr: z.string().min(20).max(120000),
+  decisionId: z.string().uuid(),
+  quoteExpiresAt: z.string().datetime(),
+  buildAuthorization: z.string().min(20).max(2048),
   idempotencyKey: idempotencyKeySchema.optional(),
 });
 

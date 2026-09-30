@@ -33,10 +33,14 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
+vi.mock("@/lib/storage/audit-store", () => ({ getAuditEntryById: vi.fn() }));
+
 import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as submitSignedPost } from "@/app/api/stellar/submit-signed/route";
+import { createBuildAuthorization, getTransactionHash } from "@/lib/stellar/payment-build-authorization";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { IDEMPOTENCY_KEY_ERROR } from "@/lib/validation/schemas";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { resetSubmitIdempotencyState } from "@/lib/storage/submit-idempotency-store";
@@ -44,6 +48,8 @@ import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
 
 const OPERATOR_USER_ID = "idem-operator-id";
 const mockTxHash = "b".repeat(64);
+const decisionId = "00000000-0000-4000-8000-000000000001";
+const quoteExpiresAt = new Date(Date.now() + 300_000).toISOString();
 
 // Fixed source wallet for this operator. The submit-signed route now verifies
 // that a signed XDR's source account matches the session wallet (issue #26),
@@ -63,6 +69,18 @@ function operatorCookie() {
 }
 
 function submitRequest(body: unknown, extraHeaders: Record<string, string> = {}) {
+  const payload = body as { signedXdr?: string };
+  const authorizedBody = payload.signedXdr ? {
+    ...payload,
+    decisionId,
+    quoteExpiresAt,
+    buildAuthorization: createBuildAuthorization({
+      userId: OPERATOR_USER_ID,
+      decisionId,
+      quoteExpiresAt,
+      transactionHash: getTransactionHash(payload.signedXdr, Networks.TESTNET),
+    }),
+  } : body;
   return new NextRequest("http://localhost/api/stellar/submit-signed", {
     method: "POST",
     headers: {
@@ -70,7 +88,7 @@ function submitRequest(body: unknown, extraHeaders: Record<string, string> = {})
       cookie: operatorCookie(),
       ...extraHeaders,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(authorizedBody),
   });
 }
 
@@ -95,6 +113,12 @@ function buildSignedXdr(amount: string) {
 }
 
 beforeEach(async () => {
+  vi.mocked(getAuditEntryById).mockResolvedValue({
+    id: decisionId,
+    timestamp: new Date().toISOString(),
+    decision: "APPROVE",
+    paymentQuote: { expiresAt: quoteExpiresAt },
+  } as Awaited<ReturnType<typeof getAuditEntryById>>);
   horizonMocks.submitTransaction.mockReset();
   horizonMocks.submitTransaction.mockResolvedValue({
     hash: mockTxHash,
