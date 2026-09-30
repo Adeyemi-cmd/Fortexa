@@ -183,6 +183,17 @@ Operators can dry-run an unsaved policy draft before committing it, so the impac
 
 The audit sample is intentionally small and deterministic (newest-first, capped) to keep simulations cheap and reviewable.
 
+### 5.2b Candidate Decision Impact (History Read)
+
+Operators can see which currently allowed payments a candidate policy version would turn into a denial — and which rule is responsible — before that version is activated.
+
+1. `GET /api/policy/history?candidate=<version>` loads the active policy and the candidate version from `policy-store` (read-only).
+2. `openAllowDecisions` collects the open allow decisions from the audit history (the newest recorded result per action, when that result is `APPROVE`/`WARN`).
+3. `diffDecisionImpact` (`src/lib/validation/diff.ts`) diffs the candidate against the active policy by rule id, re-runs each open allow through the decision engine under both policies, and walks the changed rules one at a time to attribute the flip to a single rule id.
+4. The response reports `flippedIds`, the responsible `ruleId` per flip, and a `status` of `decision change` or `no decision change`.
+
+Nothing is written: the candidate is never activated and usage is never consumed. Saving still happens only via `POST /api/policy` (or `POST /api/policy/rollback`).
+
 ### 5.3 Signed Payment Submission
 
 1. Build unsigned transaction via `/api/stellar/build-payment`.
