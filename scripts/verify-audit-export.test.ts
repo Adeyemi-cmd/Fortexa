@@ -84,6 +84,13 @@ describe("fixtures — valid chains", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("valid-chain-csv-quoting.json: CSV-hostile row is still a valid chain", () => {
+    const extracted = extractExportPayload(loadFixture("valid-chain-csv-quoting.json"));
+    expect(extracted.entries).not.toBeNull();
+    const result = verifyHashChain(extracted.entries!, extracted.chainBoundary);
+    expect(result.valid).toBe(true);
+  });
+
   it("valid-all-export.json: scope=all — every user chain is valid", () => {
     const { entriesByUser } = extractExportPayload(loadFixture("valid-all-export.json"));
     expect(entriesByUser).not.toBeNull();

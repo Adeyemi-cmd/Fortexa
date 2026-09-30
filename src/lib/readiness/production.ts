@@ -83,7 +83,7 @@ function addIssue(
 }
 
 export function checkProductionReadiness(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env,
   options: ProductionReadinessOptions = {}
 ): ProductionReadinessReport {
   const cwd = options.cwd ?? process.cwd();
@@ -220,13 +220,13 @@ export function checkProductionReadiness(
 }
 
 export function shouldEnforceProductionReadiness(
-  env: NodeJS.ProcessEnv = process.env
+  env: Record<string, string | undefined> = process.env
 ) {
   return env.NODE_ENV === "production";
 }
 
 export function getProtectedPaymentFlowReadinessReport(
-  env: NodeJS.ProcessEnv = process.env,
+  env: Record<string, string | undefined> = process.env,
   options: ProductionReadinessOptions = {}
 ) {
   if (!shouldEnforceProductionReadiness(env)) {
