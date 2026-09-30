@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
+import { getRequestLogContext, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { STELLAR_PUBLIC_NETWORK_PASSPHRASE } from "@/lib/stellar/network";
+import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
 import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarSetupRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
@@ -10,6 +13,7 @@ import { logValidationFailure, toPublicValidationDetails } from "@/lib/validatio
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
+  const context = getRequestLogContext(request, "/api/stellar/setup");
   const rate = await consumeRateLimit(request, {
     key: "stellar-setup",
     limit: 20,
@@ -42,6 +46,14 @@ export async function POST(request: NextRequest) {
 
     if (!auth.ok) {
       return auth.response;
+    }
+
+    if (getStellarNetworkPassphrase() === STELLAR_PUBLIC_NETWORK_PASSPHRASE) {
+      logWarn("Stellar setup refused on public network", context);
+      return NextResponse.json(
+        { error: "Stellar setup is disabled on the public network." },
+        { status: 403, headers: rateLimitHeaders(rate) }
+      );
     }
 
     const userId = auth.session.userId;

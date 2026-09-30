@@ -58,6 +58,28 @@ function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEYS.has(key.toLowerCase());
 }
 
+const METRIC_TEXT_SENSITIVE_KEYS = new Set([...SENSITIVE_KEYS, "destination", "memo"]);
+
+const SENSITIVE_PAIR_PATTERN = new RegExp(
+  `\\b(${[...METRIC_TEXT_SENSITIVE_KEYS].join("|")})(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;]+)`,
+  "gi"
+);
+
+const WALLET_PATTERN = /G[A-Z2-7]{55}/g;
+const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/g;
+
+export function redactMetricText(text: string): string {
+  if (typeof text !== "string" || text.length === 0) {
+    return "";
+  }
+
+  return text
+    .replace(/\r\n|\n|\r/g, " ")
+    .replace(SENSITIVE_PAIR_PATTERN, (_match, key: string, separator: string) => `${key}${separator}[REDACTED]`)
+    .replace(WALLET_PATTERN, "[REDACTED]")
+    .replace(BEARER_PATTERN, "Bearer [REDACTED]");
+}
+
 export function redactSensitiveFields<T>(value: T): T {
   if (typeof value === "string") {
     return redactString(value) as unknown as T;

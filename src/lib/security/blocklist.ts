@@ -79,3 +79,28 @@ export function resetBlocklistCache(): void {
   lastRefreshAt = null;
   lastErrorSummary = null;
 }
+
+export type BlocklistVerdict =
+  | { allow: true; reasonCode: null }
+  | { allow: false; reasonCode: "BLOCKLIST_MATCH" };
+
+/**
+ * Check a destination domain against the blocklist. On a failed refresh the
+ * last cached list is still consulted so a known-bad domain is never allowed
+ * just because the feed is unreachable.
+ */
+export async function checkBlocklist(domain: string): Promise<BlocklistVerdict> {
+  let domains: string[];
+  try {
+    domains = await fetchBlocklist();
+  } catch {
+    domains = cachedDomains;
+  }
+
+  const normalized = domain.trim().toLowerCase();
+  const listed = domains.some((entry) => entry.trim().toLowerCase() === normalized);
+
+  return listed
+    ? { allow: false, reasonCode: "BLOCKLIST_MATCH" }
+    : { allow: true, reasonCode: null };
+}

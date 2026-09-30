@@ -122,6 +122,7 @@ export async function POST(request: NextRequest) {
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
+      ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}),
       ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
       (body.paymentQuote || body.paymentQuoteInput)
         ? {
