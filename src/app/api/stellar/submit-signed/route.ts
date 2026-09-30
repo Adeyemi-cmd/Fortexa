@@ -6,6 +6,7 @@ import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr } from "@/lib/stellar/client";
 import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
@@ -152,7 +153,17 @@ export async function POST(request: NextRequest) {
         headers: rateLimitHeaders(rate),
       });
     }
-
+    
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/build-payment",
+      Date.now(),
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      return notReady;
+    }
+    
     const userId = auth.session.userId;
 
     const bodyResult = await readJsonBody(request);
