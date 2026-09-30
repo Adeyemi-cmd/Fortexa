@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logInfo } from "@/lib/observability/logger";
+import { getReadiness } from "@/lib/readiness/checks";
+import { readinessBody } from "@/lib/readiness/gate";
 import { getBlocklistHealth } from "@/lib/security/blocklist";
 import { getHorizonServer } from "@/lib/stellar/client";
 import { runWithDatabase } from "@/lib/storage/db";
@@ -11,6 +13,10 @@ export async function GET(request: NextRequest) {
   const context = getRequestLogContext(request, "/api/health");
 
   logInfo("Health check requested", context);
+
+  // Run readiness BEFORE any call to runWithDatabase(), which applies pending
+  // migrations and would hide a stale schema.
+  const readiness = await getReadiness();
 
   const env = {
     hasGroqKey: Boolean(process.env.GROQ_API_KEY),
@@ -49,9 +55,9 @@ export async function GET(request: NextRequest) {
   return jsonWithRequestContext(request, {
     route: "/api/health",
     startedAtMs,
-    status: 200,
+    status: readiness.ready ? 200 : 503,
     body: {
-      ok: true,
+      ...readinessBody(readiness),
       service: "fortexa",
       timestamp: new Date().toISOString(),
       env,
