@@ -1,5 +1,9 @@
+declare global {
+  var MOCK_SESSION_PUBLIC_KEY: string | undefined;
+}
+
 import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "./route";
@@ -110,14 +114,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(requireAuth).mockImplementation(() => ({
     ok: true,
-    session: { userId: "user-1", publicKey: (globalThis as any).MOCK_SESSION_PUBLIC_KEY || "GCDEFAULTTESTWALLET123" },
+    session: { userId: "user-1", publicKey: globalThis.MOCK_SESSION_PUBLIC_KEY || "GCDEFAULTTESTWALLET123" },
   } as ReturnType<typeof requireAuth>));
 });
 
 describe("POST /api/stellar/submit-signed - source wallet verification", () => {
   it("accepts a submission whose XDR source matches the session wallet", async () => {
     const walletKp = Keypair.random();
-    (globalThis as any).MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
     const signedXdr = buildSignedXdr(walletKp, walletKp.publicKey());
 
     vi.mocked(getUserWallet).mockResolvedValue({
@@ -167,7 +171,7 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
 
   it("rejects malformed XDR with a 400", async () => {
     const walletKp = Keypair.random();
-    (globalThis as any).MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
 
     vi.mocked(getUserWallet).mockResolvedValue({
       userId: "user-1",
