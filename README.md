@@ -537,7 +537,7 @@ Otherwise Fortexa falls back to local JSON files:
 - Vercel default: `/tmp/fortexa/*.json`
 
 Optional overrides:
-- `FORTEXA_STORE_DIR` to set file-store directory explicitly
+- `FORTEXA_STORE_DIR` to set file-store directory explicitly (the audit file store only opens paths that resolve inside this directory; `..`, absolute paths outside it, and symlinks leading out of it are refused with a `StoragePathError`)
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
   - use an absolute path on Vercel (example: `/tmp/fortexa/shared-security-state.json`)
 - `REDIS_URL` for multi-instance deployments (e.g. Vercel)
