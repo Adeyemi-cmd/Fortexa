@@ -65,7 +65,7 @@ export function useAuthSession() {
     void fetchSession();
   }, []);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
 
     try {

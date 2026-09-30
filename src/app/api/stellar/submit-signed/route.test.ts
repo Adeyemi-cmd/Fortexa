@@ -111,7 +111,7 @@ beforeEach(() => {
   vi.mocked(requireAuth).mockImplementation(() => ({
     ok: true,
     session: { userId: "user-1", publicKey: global.MOCK_SESSION_PUBLIC_KEY || "GCDEFAULTTESTWALLET123" },
-  } as any));
+  } as ReturnType<typeof requireAuth>));
 });
 
 describe("POST /api/stellar/submit-signed - source wallet verification", () => {

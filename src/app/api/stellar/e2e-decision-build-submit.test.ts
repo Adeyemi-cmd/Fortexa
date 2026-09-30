@@ -60,6 +60,7 @@ function operatorCookie() {
     email: "e2e-operator@fortexa.local",
     role: "operator",
     userId: OPERATOR_USER_ID,
+    publicKey: sourceKeypair.publicKey(),
     expiresInSeconds: 300,
   });
 
