@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 type SessionPayload = {
   authenticated?: boolean;
@@ -65,7 +65,7 @@ export function useAuthSession() {
     void fetchSession();
   }, []);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
 
     try {
@@ -98,7 +98,7 @@ export function useAuthSession() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  };
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial session refresh on mount

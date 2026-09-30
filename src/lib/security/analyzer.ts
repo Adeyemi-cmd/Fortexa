@@ -167,7 +167,8 @@ async function fetchBlocklistWithTimeout(): Promise<{
 }> {
   try {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    const { blocklistTimeoutMs } = getAnalyzerConfig();
+    const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
 
     try {
       const blocklist = await fetchBlocklist();
@@ -189,23 +190,17 @@ async function fetchBlocklistWithTimeout(): Promise<{
     }
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "AbortError";
-
-  // fetchBlocklist swallows errors internally, so check health for failures
-  const health = getBlocklistHealth();
-  if (health.configured && health.lastError) {
-    const isTimeout =
-      /abort|timeout/i.test(health.lastError);
-    return {
-      blocklist,
-      status: {
-        blocked: true,
-        timedOut: isTimeout,
-        error: health.lastError,
-      },
+    const health = getBlocklistHealth();
+    const blocklist = [];
+    return { 
+      blocklist, 
+      status: { 
+        blocked: true, 
+        timedOut: isTimeout || /abort|timeout/i.test(health.lastError || ""), 
+        error: health.lastError || "Blocklist fetch failed" 
+      } 
     };
   }
-
-  return { blocklist, status: { blocked: false, timedOut: false } };
 }
 
 export async function evaluateSecurity(

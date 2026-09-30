@@ -14,6 +14,7 @@ describe("production readiness", () => {
   it("passes for a valid production configuration", () => {
     const report = checkProductionReadiness(
       {
+        NODE_ENV: "test",
         DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
@@ -29,7 +30,7 @@ describe("production readiness", () => {
   });
 
   it("reports missing required production variables", () => {
-    const report = checkProductionReadiness({}, { cwd: "/srv/fortexa" });
+    const report = checkProductionReadiness({ NODE_ENV: "test" }, { cwd: "/srv/fortexa" });
 
     expect(report.ok).toBe(false);
     expect(report.issues.map((issue) => issue.setting)).toEqual(
@@ -47,6 +48,7 @@ describe("production readiness", () => {
   it("rejects the wrong Stellar network passphrase for production", () => {
     const report = checkProductionReadiness(
       {
+        NODE_ENV: "test",
         DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
@@ -70,6 +72,7 @@ describe("production readiness", () => {
   it("rejects missing storage backend configuration", () => {
     const report = checkProductionReadiness(
       {
+        NODE_ENV: "test",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
@@ -93,6 +96,7 @@ describe("production readiness", () => {
   it("rejects unsafe demo defaults for Horizon and file storage", () => {
     const report = checkProductionReadiness(
       {
+        NODE_ENV: "test",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
@@ -124,6 +128,7 @@ describe("production readiness", () => {
   it("formats actionable output without exposing secret values", () => {
     const report = checkProductionReadiness(
       {
+        NODE_ENV: "test",
         FORTEXA_AUTH_SECRET: "too-short-secret",
       },
       { cwd: "/srv/fortexa" }
