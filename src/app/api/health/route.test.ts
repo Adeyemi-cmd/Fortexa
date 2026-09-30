@@ -26,6 +26,7 @@ describe("GET /api/health", () => {
     delete process.env.GROQ_API_KEY;
     delete process.env.FORTEXA_AUTH_SECRET;
     delete process.env.STELLAR_HORIZON_URL;
+    delete process.env.DATABASE_URL;
   });
 
   it("returns healthy states when dependencies are configured and reachable", async () => {
@@ -93,5 +94,56 @@ describe("GET /api/health", () => {
     expect(json.dependencies.groq).toBe("unconfigured");
     expect(json.dependencies.horizon).toBe("unknown");
     expect(json.dependencies.blocklist).toBe("unconfigured");
+  });
+
+  describe("readiness", () => {
+    beforeEach(() => {
+      mockGetBlocklistHealth.mockReturnValue({
+        configured: false,
+        lastRefreshAt: null,
+        domainCount: 0,
+        lastError: null,
+      });
+    });
+
+    async function readiness() {
+      const response = await GET(new NextRequest("http://localhost:3000/api/health"));
+      expect(response.status).toBe(200);
+      return (await response.json()) as { ready: boolean; failingChecks: string[]; checks: unknown[] };
+    }
+
+    it("reports ready when the configured database and Horizon answer", async () => {
+      process.env.DATABASE_URL = "postgres://fortexa@db.example.com/fortexa";
+      process.env.STELLAR_HORIZON_URL = "https://horizon.example.com";
+      mockRunWithDatabase.mockResolvedValue({ available: true });
+      mockRoot.mockResolvedValue({});
+
+      const json = await readiness();
+
+      expect(json.ready).toBe(true);
+      expect(json.failingChecks).toEqual([]);
+      expect(json.checks).toHaveLength(3);
+    });
+
+    it("names the failing checks when the database and Horizon do not answer", async () => {
+      process.env.DATABASE_URL = "postgres://fortexa@db.example.com/fortexa";
+      process.env.STELLAR_HORIZON_URL = "https://horizon.example.com";
+      mockRunWithDatabase.mockResolvedValue({ available: false });
+      mockRoot.mockRejectedValue(new Error("Timeout"));
+
+      const json = await readiness();
+
+      expect(json.ready).toBe(false);
+      expect(json.failingChecks).toEqual(["storage", "horizon"]);
+    });
+
+    it("does not treat the file store as a failing database", async () => {
+      mockRunWithDatabase.mockResolvedValue({ available: false });
+
+      const json = await readiness();
+
+      expect(json.ready).toBe(true);
+      expect(mockRoot).not.toHaveBeenCalled();
+    });
   });
 });

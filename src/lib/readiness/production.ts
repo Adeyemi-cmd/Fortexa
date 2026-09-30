@@ -252,3 +252,59 @@ export function formatProductionReadinessReport(
 
   return lines.join("\n");
 }
+
+export type ServiceReadinessCheckName = "production_config" | "storage" | "horizon";
+
+export type ServiceReadinessCheck = {
+  name: ServiceReadinessCheckName;
+  ok: boolean;
+};
+
+export type ServiceReadiness = {
+  ready: boolean;
+  checks: ServiceReadinessCheck[];
+  failingChecks: ServiceReadinessCheckName[];
+};
+
+/**
+ * Whether the process can serve payment and policy actions. The health route
+ * computes this once and the dashboard only renders what the route returns,
+ * so both agree on one answer.
+ *
+ * - production_config: the same report the payment routes enforce, so the
+ *   dashboard hides actions exactly when build-payment and submit-signed
+ *   would answer 503.
+ * - storage: a configured database that does not answer. The file store
+ *   (no DATABASE_URL) has nothing to wait for.
+ * - horizon: a configured Horizon endpoint that does not answer.
+ */
+export function evaluateServiceReadiness(input: {
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  databaseAvailable: boolean;
+  horizonStatus: string;
+}): ServiceReadiness {
+  const env = input.env ?? process.env;
+  const checks: ServiceReadinessCheck[] = [
+    {
+      name: "production_config",
+      ok: getProtectedPaymentFlowReadinessReport(env, { cwd: input.cwd }) === null,
+    },
+    {
+      name: "storage",
+      ok: !normalizeConfiguredValue(env.DATABASE_URL) || input.databaseAvailable,
+    },
+    {
+      name: "horizon",
+      ok: input.horizonStatus !== "degraded",
+    },
+  ];
+
+  const failingChecks = checks.filter((check) => !check.ok).map((check) => check.name);
+
+  return {
+    ready: failingChecks.length === 0,
+    checks,
+    failingChecks,
+  };
+}
