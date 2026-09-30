@@ -79,3 +79,19 @@ export function resetBlocklistCache(): void {
   lastRefreshAt = null;
   lastErrorSummary = null;
 }
+
+/**
+ * Returns true when a Stellar address appears in the external blocklist.
+ * Fail-open on feed errors, matching the analyzer: an unreachable feed must
+ * not take payment routes down, and feed health is reported via /api/health.
+ */
+export async function isAddressBlocklisted(address: string): Promise<boolean> {
+  let domains: string[];
+  try {
+    domains = await fetchBlocklist();
+  } catch {
+    return false;
+  }
+  const needle = address.trim().toUpperCase();
+  return domains.some((entry) => entry.trim().toUpperCase() === needle);
+}

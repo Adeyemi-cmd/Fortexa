@@ -59,7 +59,7 @@ export const agentActionSchema = z.object({
   metadata: z.record(z.string(), metadataValueSchema).optional(),
 });
 
-const stellarPublicKeySchema = z
+export const stellarPublicKeySchema = z
   .string()
   .startsWith("G", { message: "Destination must be a Stellar public key." })
   .min(56)

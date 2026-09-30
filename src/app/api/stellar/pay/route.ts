@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isAddressBlocklisted } from "@/lib/security/blocklist";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
@@ -39,6 +42,31 @@ export async function POST(request: NextRequest) {
           details: toPublicValidationDetails(parsedPayload.error),
         },
         { status: 400, headers: rateLimitHeaders(rate) }
+      );
+    }
+
+    const payload = parsedPayload.data;
+
+    if (await isAddressBlocklisted(payload.destination)) {
+      return NextResponse.json(
+        { error: "Destination is blocklisted." },
+        { status: 403, headers: rateLimitHeaders(rate) }
+      );
+    }
+
+    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
+    const verification = verifyPaymentAgainstQuote(auditEntry, {
+      destination: payload.destination,
+      amountXLM: payload.amountXLM,
+      asset: payload.asset,
+      memo: payload.memo,
+      network: payload.network,
+    });
+
+    if (!verification.ok) {
+      return NextResponse.json(
+        { error: verification.error, field: verification.field },
+        { status: verification.status, headers: rateLimitHeaders(rate) }
       );
     }
 
