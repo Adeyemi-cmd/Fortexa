@@ -38,7 +38,7 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = messages ?? [];
+      fieldErrors[field] = Array.isArray(messages) ? messages.map(String) : [];
     }
   }
 
@@ -54,12 +54,9 @@ export function logValidationFailure(
   error: ZodError,
   rawBody?: unknown,
 ): void {
-  logWarn(
-    message,
-    redactSensitiveFields({
-      ...context,
-      validation: error.flatten(),
-      body: rawBody,
-    }) as LogContext,
-  );
+  logWarn(message, redactSensitiveFields({
+    ...context,
+    validation: error.flatten(),
+    body: rawBody,
+  }));
 }
