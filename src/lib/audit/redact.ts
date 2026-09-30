@@ -85,7 +85,7 @@ const DEFAULT_CONFIG: RedactionConfig = {
     /signed[_\s-]?xdr/i,
     /signed[_\s-]?tx/i,
     // JWT-ish
-    /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/,
+    /^[A-Za-z0-9_-]+\.[a-zA-Z0-9_-]+\.[A-Za-z0-9_-]+$/,
   ],
   maxDepth: 25,
 };
@@ -256,7 +256,7 @@ export function redactAuditExportPayload<T>(
     return value;
   }
 
-  return walk(input, 0) as T;
+  return walk(start, 0) as T;
 }
 
 /**
