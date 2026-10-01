@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
+import {
+  buildPaymentComparisonFromQuoteInput,
+  evaluateDecision,
+} from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -10,43 +13,74 @@ import {
   logInfo,
   logWarn,
 } from "@/lib/observability/logger";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
+import { redactSensitiveFields } from "@/lib/observability/redact";
 import { demoScenarios } from "@/lib/scenarios/seed";
-import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
   appendAuditEntry,
   consumeUsage,
   getDailyUsage,
 } from "@/lib/storage/audit-store";
+import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { getPolicyConfig } from "@/lib/storage/policy-store";
 import { buildPaymentQuoteFromDecision } from "@/lib/stellar/verify-payment-quote";
 import type { AuditEntry } from "@/lib/types/domain";
 import { decisionRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/decision");
 
-  const rate = await consumeRateLimit(request, {
-    key: "decision",
+  // Read the body before consuming the rate budget so the gate can check the
+  // requested destination against the blocklist in the same atomic step.
+  const rawBody = (await request.json().catch(() => ({}))) as unknown;
+
+  const rawDestination =
+    typeof rawBody === "object" && rawBody !== null
+      ? ((rawBody as Record<string, unknown>).destination ??
+        ((rawBody as Record<string, unknown>).paymentQuoteInput as Record<string, unknown> | undefined)
+          ?.destination ??
+        ((rawBody as Record<string, unknown>).paymentQuote as Record<string, unknown> | undefined)
+          ?.destination)
+      : undefined;
+
+  const rawActionDomain =
+    typeof rawBody === "object" && rawBody !== null
+      ? ((rawBody as Record<string, unknown>).action as Record<string, unknown> | undefined)
+        ?.domain
+      : undefined;
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "decision",
     limit: 40,
     windowMs: 60_000,
+    destination: typeof rawDestination === "string" ? rawDestination : undefined,
+    actionDomain: typeof rawActionDomain === "string" ? rawActionDomain : undefined,
   });
 
-  if (!rate.ok) {
-    logWarn("Decision route rate limited", context);
+  if (!gate.ok) {
+    logWarn("Decision route blocked by enforcement gate", {
+      ...context,
+      gateCode: gate.code,
+    });
     return jsonWithRequestContext(request, {
       route: "/api/decision",
       startedAtMs,
-      status: 429,
-      body: { error: "Rate limit exceeded for decision endpoint." },
-      headers: rateLimitHeaders(rate),
+      status: gate.status,
+      body: {
+        error: gate.error,
+        code: gate.code,
+      },
+      headers: gateErrorHeaders(gate),
     });
   }
 
+  const rate = gate.rate;
+
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["operator", "signer"] });
 
     if (!auth.ok) {
       logWarn("Decision route unauthorized", context);
@@ -54,19 +88,28 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
-
+const notReady = await readinessBlockResponse(
+      request,
+      "/api/decision",
+      startedAtMs,
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      logWarn("Decision route blocked: not ready", { ...context, userId });
+      return notReady;
+    }
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
-      logValidationFailure("Decision route validation failed", { ...context, userId }, parsedBody.error, rawBody);
+      logWarn("Decision route validation failed", { ...context, userId });
       return jsonWithRequestContext(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
         body: {
           error: "Invalid decision request body.",
-          details: toPublicValidationDetails(parsedBody.error),
+          details: parsedBody.error.flatten(),
         },
         headers: rateLimitHeaders(rate),
       });
@@ -94,7 +137,21 @@ export async function POST(request: NextRequest) {
 
     const { policy } = await getPolicyConfig();
     const usage = await getDailyUsage(userId);
-    const decision = await evaluateDecision(action, policy, usage);
+
+    // Shared engine path (same function simulate uses): include asset,
+    // amount, destination, and memo in the allow/deny comparison whenever the
+    // caller supplies a payment quote. No transaction is built here.
+    const quoteInput = body.paymentQuote ?? body.paymentQuoteInput;
+    const payment = quoteInput
+      ? buildPaymentComparisonFromQuoteInput({
+          destination: quoteInput.destination,
+          memo: quoteInput.memo,
+          network: quoteInput.network,
+          asset: quoteInput.asset,
+          amountXLM: action.amountXLM,
+        })
+      : undefined;
+    const decision = await evaluateDecision(action, policy, usage, payment);
 
     let finalDecision = decision.decision;
     let explanation = decision.explanation;
@@ -109,9 +166,10 @@ export async function POST(request: NextRequest) {
       await consumeUsage(userId, action.amountXLM);
     }
 
+    const decisionNowMs = Date.now();
     const auditEntry: AuditEntry = {
       id: randomUUID(),
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(decisionNowMs).toISOString(),
       action,
       decision: finalDecision,
       explanation,
@@ -130,6 +188,7 @@ export async function POST(request: NextRequest) {
               memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
               actionId: action.id,
               network: (body.paymentQuote || body.paymentQuoteInput)!.network,
+              nowMs: decisionNowMs,
             }),
           }
         : {}),
@@ -163,11 +222,19 @@ export async function POST(request: NextRequest) {
         userId,
       },
       headers: rateLimitHeaders(rate),
+      // A decision response is per-user and must never be cached.
+      noStore: true,
     });
   } catch (error) {
+    // #205: pass error detail through the shared observability redactor so
+    // destination addresses, memos, and secret-bearing values never reach logs.
+    // The API metric for this 500 response is still recorded by
+    // jsonWithRequestContext — redaction must not suppress it.
+    const redactedDetail =
+      error instanceof Error ? redactSensitiveFields(error.message) : "unknown";
     logError("Decision route internal error", {
       ...context,
-      detail: error instanceof Error ? error.message : "unknown",
+      detail: redactedDetail,
     });
     return jsonWithRequestContext(request, {
       route: "/api/decision",

@@ -1,8 +1,18 @@
-export type RedactionReason =
-  | "session"
-  | "token"
-  | "signed_xdr"
-  | "sensitive_field";
+/**
+ * List of fields that should be redacted in audit rows
+ */
+const SECRET_FIELDS = new Set([
+  'secret',
+  'privateKey',
+  'apiKey',
+  'password',
+  'token',
+  'authorization',
+  'accessToken',
+  'refreshToken',
+  'seed',
+  'mnemonic'
+]);
 
 export type RedactedValue = { $redacted: RedactionReason };
 
@@ -85,7 +95,7 @@ const DEFAULT_CONFIG: RedactionConfig = {
     /signed[_\s-]?xdr/i,
     /signed[_\s-]?tx/i,
     // JWT-ish
-    /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/,
+    /^[A-Za-z0-9_-]+\.[a-zA-Z0-9_-]+\.[A-Za-z0-9_-]+$/,
   ],
   maxDepth: 25,
 };
@@ -132,70 +142,33 @@ function classifyKeyAndValue(
     return "sensitive_field";
   }
 
-  for (const re of DEFAULT_CONFIG.sensitiveKeyPatterns ?? []) {
-    if (re.test(key)) {
-      if (/session/i.test(key)) return "session";
-      if (/bearer|token|authorization|jwt|auth/i.test(key)) return "token";
-      if (/signed|xdr|signature/i.test(key)) return "signed_xdr";
-      return "sensitive_field";
+  if (Array.isArray(obj)) {
+    return obj.map(redactObject);
+  }
+
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (SECRET_FIELDS.has(key.toLowerCase())) {
+      result[key] = '[REDACTED]';
+    } else if (typeof value === 'object' && value !== null) {
+      result[key] = redactObject(value);
+    } else {
+      result[key] = value;
     }
   }
 
-  if (typeof value === "string") {
-    const s = value;
-
-    // Value-based redaction
-    for (const vre of DEFAULT_CONFIG.sensitiveValuePatterns ?? []) {
-      if (vre.test(s)) {
-        if (/signed[_\s-]?xdr/i.test(s) || looksLikeSignedXdrValue(s)) {
-          return "signed_xdr";
-        }
-        if (/jwt|bearer|token/i.test(s)) return "token";
-      }
-    }
-
-    if (looksLikeSignedXdrValue(s)) {
-      return "signed_xdr";
-    }
-  }
-
-  // Sometimes signed material sits under generic keys.
-  if (typeof value === "string" && looksLikeSignedXdrValue(value)) {
-    return "signed_xdr";
-  }
-
-  return null;
+  return result;
 }
 
 /**
- * Redacts sensitive fields from an arbitrary JSON-like payload.
- *
- * Safety goals:
- * - Never leak session keys, bearer/auth tokens, or signed XDR material.
- * - Preserve non-sensitive evidence.
- * - Keep output shape (keys/arrays) for debuggability.
+ * Redacts secret fields from an audit row
+ * @param row The audit row to redact
+ * @returns A new row with secrets redacted
  */
-export function redactAuditExportPayload<T>(
-  input: T,
-  config?: RedactionConfig,
-): T {
-  const merged: RedactionConfig = {
-    ...DEFAULT_CONFIG,
-    ...(config ?? {}),
-    sensitiveKeys: [
-      ...(DEFAULT_CONFIG.sensitiveKeys ?? []),
-      ...(config?.sensitiveKeys ?? []),
-      ...ENV_SENSITIVE_KEYS,
-    ],
-    sensitiveKeyPatterns: [
-      ...(DEFAULT_CONFIG.sensitiveKeyPatterns ?? []),
-      ...(config?.sensitiveKeyPatterns ?? []),
-    ],
-    sensitiveValuePatterns: [
-      ...(DEFAULT_CONFIG.sensitiveValuePatterns ?? []),
-      ...(config?.sensitiveValuePatterns ?? []),
-    ],
-    maxDepth: config?.maxDepth ?? DEFAULT_CONFIG.maxDepth,
+export function redactSecrets<T extends { details: unknown }>(row: T): T {
+  return {
+    ...row,
+    details: redactObject(row.details)
   };
 
   const seen = new WeakSet<object>();
@@ -256,7 +229,7 @@ export function redactAuditExportPayload<T>(
     return value;
   }
 
-  return walk(input, 0) as T;
+  return walk(start, 0) as T;
 }
 
 /**
