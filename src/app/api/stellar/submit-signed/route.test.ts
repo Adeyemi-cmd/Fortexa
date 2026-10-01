@@ -1,5 +1,13 @@
-import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
-import { NextRequest } from "next/server";
+import {
+  Account,
+  Asset,
+  Keypair,
+  Memo,
+  Networks,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
+import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "./route";
@@ -126,7 +134,7 @@ function buildSignedXdr(
         amount,
       }),
     )
-    .addMemo(Memo.text("fortexa:test-action"))
+    .addMemo(memo ? Memo.text(memo) : undefined)
     .setTimeout(180)
     .build();
   tx.sign(signerKp);
@@ -192,10 +200,13 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
-    vi.mocked(readJsonBody).mockResolvedValue({ ok: true, data: { signedXdr, auditEntryId: "00000000-0000-4000-8000-000000000000" } });
+    vi.mocked(readJsonBody).mockResolvedValue({
+      ok: true,
+      data: { signedXdr, decisionReceipt },
+    });
     vi.mocked(stellarSubmitSignedRequestSchema.safeParse).mockReturnValue({
       success: true,
-      data: { signedXdr, auditEntryId: "00000000-0000-4000-8000-000000000000" },
+      data: { signedXdr, decisionReceipt },
     } as ReturnType<typeof stellarSubmitSignedRequestSchema.safeParse>);
 
     const response = await POST(buildRequest({ signedXdr, decisionReceipt }));

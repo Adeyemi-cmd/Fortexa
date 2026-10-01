@@ -1,12 +1,5 @@
-import {
-  FeeBumpTransaction,
-  Memo,
-  MemoText,
-  TransactionBuilder,
-  type Transaction,
-} from "@stellar/stellar-sdk";
+import { createHash } from "node:crypto";
 
-import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
 import { validateRequestTimestamp } from "@/lib/stellar/request-timestamp-skew";
 import {
   parseXlmNumberToStroops,
@@ -52,7 +45,8 @@ const PAYMENT_AMOUNT_DECIMAL_PLACES = 7;
 export const PAYMENT_AMOUNT_ERROR =
   "amountXLM must be a positive finite XLM amount with up to 7 decimals.";
 
-const MAX_PAYMENT_AMOUNT_STROOPS = BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_XLM;
+const MAX_PAYMENT_AMOUNT_STROOPS =
+  BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_XLM;
 
 /**
  * Reads an authorized amount as an exact stroop count, or `null` if it is not
@@ -62,7 +56,9 @@ const MAX_PAYMENT_AMOUNT_STROOPS = BigInt(MAX_PAYMENT_AMOUNT_XLM) * STROOPS_PER_
  */
 function toAuthorizedStroops(amount: number | string): bigint | null {
   const parsed =
-    typeof amount === "number" ? parseXlmNumberToStroops(amount) : parseXlmToStroops(amount);
+    typeof amount === "number"
+      ? parseXlmNumberToStroops(amount)
+      : parseXlmToStroops(amount);
 
   if (!parsed.ok) {
     return null;
@@ -161,6 +157,29 @@ export function normalizeAmountXLM(amount: number | string): string {
   return parsed.toFixed(7);
 }
 
+export function buildDecisionReceipt(input: {
+  destination: string;
+  amountXLM: number | string;
+  asset?: StellarAssetId;
+  memo?: string;
+  network?: StellarNetworkId;
+}): PaymentQuote {
+  const normalized = {
+    destination: input.destination.trim().toUpperCase(),
+    amountXLM: normalizeAmountXLM(input.amountXLM),
+    asset: input.asset ?? "native",
+    memo: (input.memo ?? "").slice(0, 28),
+    network: input.network ?? "testnet",
+  };
+
+  return {
+    ...normalized,
+    receiptHash: createHash("sha256")
+      .update(JSON.stringify(normalized, Object.keys(normalized).sort()))
+      .digest("hex"),
+  };
+}
+
 export function buildPaymentQuoteFromDecision(input: {
   destination: string;
   amountXLM: number;
@@ -169,14 +188,12 @@ export function buildPaymentQuoteFromDecision(input: {
   network?: StellarNetworkId;
   nowMs?: number;
 }): PaymentQuote {
-  return {
-    destination: input.destination.trim().toUpperCase(),
-    amountXLM: normalizeAmountXLM(input.amountXLM),
-    asset: "native",
-    memo: (input.memo ?? `fortexa:${input.actionId}`).slice(0, 28),
-    network: input.network ?? "testnet",
-    expiresAt: new Date((input.nowMs ?? Date.now()) + getQuoteTtlMs()).toISOString(),
-  };
+  return buildDecisionReceipt({
+    destination: input.destination,
+    amountXLM: input.amountXLM,
+    memo: input.memo ?? `fortexa:${input.actionId}`,
+    network: input.network,
+  });
 }
 
 export function getQuoteExpiresAt(auditEntry: AuditEntry): string {
@@ -185,18 +202,40 @@ export function getQuoteExpiresAt(auditEntry: AuditEntry): string {
   return Number.isFinite(legacyExpiryMs) ? new Date(legacyExpiryMs).toISOString() : "";
 }
 
-/** Rechecks the persisted decision and its original expiry at submission time. */
-export function isPaymentDecisionCurrent(
-  auditEntry: AuditEntry | undefined,
-  decisionId: string,
-  quoteExpiresAt: string,
-  nowMs = Date.now(),
-): boolean {
-  if (!auditEntry?.paymentQuote || auditEntry.id !== decisionId ||
-      !EXECUTABLE_DECISIONS.has(auditEntry.decision)) return false;
-  const storedExpiry = getQuoteExpiresAt(auditEntry);
-  const expiryMs = Date.parse(storedExpiry);
-  return storedExpiry === quoteExpiresAt && Number.isFinite(expiryMs) && nowMs < expiryMs;
+  try {
+    const normalized = {
+      destination: receipt.destination.trim().toUpperCase(),
+      amountXLM: normalizeAmountXLM(receipt.amountXLM),
+      asset: receipt.asset,
+      memo: receipt.memo.slice(0, 28),
+      network: receipt.network,
+    };
+
+    const expectedHash = createHash("sha256")
+      .update(JSON.stringify(normalized, Object.keys(normalized).sort()))
+      .digest("hex");
+
+    if (receipt.receiptHash && receipt.receiptHash !== expectedHash) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Payment decision receipt is corrupted or tampered.",
+        field: "amountXLM",
+      } as any;
+    }
+
+    return {
+      ok: true,
+      normalized: { ...normalized, receiptHash: expectedHash },
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      error: PAYMENT_AMOUNT_ERROR,
+      field: "amountXLM",
+    } as any;
+  }
 }
 
 export function verifyPaymentAgainstQuote(
@@ -289,6 +328,15 @@ export function verifyPaymentAgainstQuote(
       ok: false,
       status: 403,
       error: "Memo does not match the authorized payment quote.",
+      field: "memo",
+    };
+  }
+
+  if (!quote.memo || quote.memo.length === 0) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Memo is required for this payment destination.",
       field: "memo",
     };
   }

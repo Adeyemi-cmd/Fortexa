@@ -179,6 +179,7 @@ const notReady = await readinessBlockResponse(
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
+      ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}),
       ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
       (body.paymentQuote || body.paymentQuoteInput)
         ? {

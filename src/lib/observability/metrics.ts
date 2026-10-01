@@ -1,3 +1,5 @@
+import { redactMetricText } from "@/lib/observability/redact";
+
 type MetricKey = `${string}:${string}`;
 
 export type DecisionOutcome = "APPROVE" | "WARN" | "REQUIRE_APPROVAL" | "BLOCK";
@@ -102,6 +104,39 @@ export const SUBMIT_FAILURE_RESULTS: readonly StellarSubmitResult[] = [
  * while still bounding explosion if the allowlist is misconfigured.
  */
 export const MAX_CARDINALITY = 200;
+
+/**
+ * Documented metric names (see docs/observability.md). Anything else is
+ * rejected by the exporter: series names must never carry payment data
+ * (destination, memo, wallet) or attacker-controlled free text.
+ */
+export const ALLOWED_METRIC_NAMES: ReadonlySet<string> = new Set<string>([
+  "fortexa_requests_total",
+  "fortexa_request_errors_total",
+  "fortexa_request_duration_ms_p95",
+  "fortexa_decision_outcomes_total",
+  "fortexa_stellar_submit_results_total",
+]);
+
+/**
+ * The only label keys allowed on an exported series. In particular
+ * `destination` and `memo` are rejected: they leak payment data and
+ * blow up cardinality.
+ */
+export const ALLOWED_LABEL_KEYS: ReadonlySet<string> = new Set<string>([
+  "route",
+  "method",
+  "outcome",
+  "result",
+]);
+
+export function isAllowedMetricName(name: string): boolean {
+  return typeof name === "string" && ALLOWED_METRIC_NAMES.has(name);
+}
+
+export function isAllowedLabelKey(key: string): boolean {
+  return typeof key === "string" && ALLOWED_LABEL_KEYS.has(key);
+}
 
 const decisionOutcomeCounts = new Map<DecisionOutcome, number>();
 const stellarSubmitResultCounts = new Map<StellarSubmitResult, number>();
@@ -285,47 +320,58 @@ export function getMetricsSnapshot() {
   };
 }
 
+export function renderHelpLine(name: string, helpText: string): string | null {
+  if (!isAllowedMetricName(name)) {
+    return null;
+  }
+  return `# HELP ${name} ${redactMetricText(helpText)}`;
+}
+
+export function renderTypeLine(name: string, type: "counter" | "gauge"): string | null {
+  if (!isAllowedMetricName(name)) {
+    return null;
+  }
+  return `# TYPE ${name} ${type}`;
+}
+
+export function renderMetricLine(
+  name: string,
+  labels: Record<string, string>,
+  value: string | number
+): string | null {
+  if (!isAllowedMetricName(name)) {
+    return null;
+  }
+  const keys = Object.keys(labels);
+  for (const key of keys) {
+    if (!isAllowedLabelKey(key)) {
+      return null;
+    }
+  }
+  const renderedLabels = keys
+    .map((key) => `${key}="${escapePrometheusLabelValue(String(labels[key]))}"`)
+    .join(",");
+  return `${name}{${renderedLabels}} ${value}`;
+}
+
 export function toPrometheusText() {
   const snapshot = getMetricsSnapshot();
   const lines: string[] = [];
 
-  lines.push("# HELP fortexa_requests_total Total API requests by route/method");
-  lines.push("# TYPE fortexa_requests_total counter");
+  const push = (...candidates: Array<string | null>) => {
+    for (const line of candidates) {
+      if (line !== null) {
+        lines.push(line);
+      }
+    }
+  };
 
+  push(renderHelpLine("fortexa_requests_total", "Total API requests by route/method"));
+  push(renderTypeLine("fortexa_requests_total", "counter"));
   for (const route of snapshot.routes) {
-    lines.push(
-      `fortexa_requests_total{route="${escapePrometheusLabelValue(route.route)}",method="${escapePrometheusLabelValue(route.method)}"} ${route.totalCount}`
+    push(
+      renderMetricLine("fortexa_requests_total", { route: route.route, method: route.method }, route.totalCount)
     );
-  }
-
-  lines.push("# HELP fortexa_request_errors_total Total API errors by route/method");
-  lines.push("# TYPE fortexa_request_errors_total counter");
-
-  for (const route of snapshot.routes) {
-    lines.push(
-      `fortexa_request_errors_total{route="${escapePrometheusLabelValue(route.route)}",method="${escapePrometheusLabelValue(route.method)}"} ${route.errorCount}`
-    );
-  }
-
-  lines.push("# HELP fortexa_request_duration_ms_p95 P95 request duration in milliseconds");
-  lines.push("# TYPE fortexa_request_duration_ms_p95 gauge");
-
-  for (const route of snapshot.routes) {
-    lines.push(
-      `fortexa_request_duration_ms_p95{route="${escapePrometheusLabelValue(route.route)}",method="${escapePrometheusLabelValue(route.method)}"} ${route.p95DurationMs.toFixed(2)}`
-    );
-  }
-
-  lines.push("# HELP fortexa_decision_outcomes_total Total decision evaluations by outcome");
-  lines.push("# TYPE fortexa_decision_outcomes_total counter");
-  for (const [outcome, count] of decisionOutcomeCounts) {
-    lines.push(`fortexa_decision_outcomes_total{outcome="${escapePrometheusLabelValue(outcome)}"} ${count}`);
-  }
-
-  lines.push("# HELP fortexa_stellar_submit_results_total Total Stellar submission attempts by result");
-  lines.push("# TYPE fortexa_stellar_submit_results_total counter");
-  for (const [result, count] of stellarSubmitResultCounts) {
-    lines.push(`fortexa_stellar_submit_results_total{result="${escapePrometheusLabelValue(result)}"} ${count}`);
   }
 
   // Rolled-up enforcement counters. These are always emitted (zero-initialised) so
@@ -343,9 +389,11 @@ export function toPrometheusText() {
   lines.push("# TYPE fortexa_rate_limit_rejections_total counter");
   lines.push(`fortexa_rate_limit_rejections_total ${snapshot.counters.rateLimit}`);
 
-  lines.push("# HELP fortexa_stellar_submit_failures_total Total Stellar submissions that did not settle on-chain");
-  lines.push("# TYPE fortexa_stellar_submit_failures_total counter");
-  lines.push(`fortexa_stellar_submit_failures_total ${snapshot.counters.submitFailures}`);
+  push(renderHelpLine("fortexa_stellar_submit_results_total", "Total Stellar submission attempts by result"));
+  push(renderTypeLine("fortexa_stellar_submit_results_total", "counter"));
+  for (const [result, count] of stellarSubmitResultCounts) {
+    push(renderMetricLine("fortexa_stellar_submit_results_total", { result }, count));
+  }
 
   return `${lines.join("\n")}\n`;
 }

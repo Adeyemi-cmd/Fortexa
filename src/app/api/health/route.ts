@@ -2,8 +2,7 @@ import { NextRequest } from "next/server";
 
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logInfo } from "@/lib/observability/logger";
-import { getReadiness } from "@/lib/readiness/checks";
-import { readinessBody } from "@/lib/readiness/gate";
+import { evaluateServiceReadiness } from "@/lib/readiness/production";
 import { getBlocklistHealth } from "@/lib/security/blocklist";
 import { getHorizonServer } from "@/lib/stellar/client";
 import { getDatabaseMigrationStatus } from "@/lib/storage/db";
@@ -57,18 +56,26 @@ export async function GET(request: NextRequest) {
   };
   const ready = storageStatus !== "not_ready";
 
+  const readiness = evaluateServiceReadiness({
+    databaseAvailable: storageCheck.available,
+    horizonStatus,
+  });
+
   return jsonWithRequestContext(request, {
     route: "/api/health",
     startedAtMs,
-    status: readiness.ready ? 200 : 503,
+    status: ready ? 200 : 503,
     body: {
-      ...readinessBody(readiness),
+      ok: ready,
       service: "fortexa",
       timestamp: new Date().toISOString(),
       env,
       migrations,
       blocklist: blocklistData,
       dependencies,
+      ready: readiness.ready,
+      checks: readiness.checks,
+      failingChecks: readiness.failingChecks,
     },
   });
 }

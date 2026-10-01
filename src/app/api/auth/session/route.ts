@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getSessionFromRequest } from "@/lib/auth/session";
-import { securityHeadersForRequest } from "@/lib/security/headers";
+import { getActiveSessionFromRequest } from "@/lib/auth/session-revocation";
 
 export async function GET(request: NextRequest) {
   const session = await getActiveSessionFromRequest(request);

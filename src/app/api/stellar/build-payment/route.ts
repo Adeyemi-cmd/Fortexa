@@ -12,6 +12,10 @@ import { getQuoteExpiresAt, verifyPaymentAgainstQuote } from "@/lib/stellar/veri
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
+import {
+  logValidationFailure,
+  toPublicValidationDetails,
+} from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   // Read the body first so the gate can blocklist-check the destination in
@@ -56,7 +60,7 @@ export async function POST(request: NextRequest) {
           issues: readinessReport.issues,
           command: "npm run check:production-readiness",
         },
-        { status: 503, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
+        { status: 503, headers: rateLimitHeaders(rate) },
       );
     }
     const notReady = await readinessBlockResponse(
@@ -74,7 +78,7 @@ export async function POST(request: NextRequest) {
     if (assignedWallet && "expired" in assignedWallet) {
       return NextResponse.json(
         { error: "Session wallet mapping has expired." },
-        { status: 401, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
+        { status: 401, headers: rateLimitHeaders(rate) },
       );
     }
 
@@ -85,9 +89,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
+    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(
+      bodyResult.data,
+    );
 
     if (!parsedPayload.success) {
+      logValidationFailure(
+        "Stellar build payment validation failed",
+        { route: "/api/stellar/build-payment", userId },
+        parsedPayload.error,
+        bodyResult.data,
+      );
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
@@ -156,9 +168,8 @@ export async function POST(request: NextRequest) {
         sourcePublicKey,
         xdr: unsigned.xdr,
         networkPassphrase: unsigned.networkPassphrase,
-        decisionId: auditEntry!.id,
-        quoteExpiresAt,
-        buildAuthorization,
+        decisionReceipt: verification.quote,
+        paymentQuote: verification.quote,
       },
       { headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );

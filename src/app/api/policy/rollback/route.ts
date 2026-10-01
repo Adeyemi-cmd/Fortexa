@@ -4,7 +4,8 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { readJsonBody } from "@/lib/http/read-json-body";
-import { rollbackPolicyVersion, getPolicyVersionByNumber } from "@/lib/storage/policy-store";
+import { collectRollbackConflicts } from "@/lib/decision/rollback-conflicts";
+import { getPolicyVersionByNumber, rollbackPolicyVersion } from "@/lib/storage/policy-store";
 import { policyRollbackSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 import { hasSensitiveField } from "@/lib/settings/save-safety";
@@ -66,8 +67,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const targetPolicyRecord = await getPolicyVersionByNumber(parsed.data.targetVersion);
-    const targetPolicy = targetPolicyRecord.policy;
+    const targetEntry = await getPolicyVersionByNumber(parsed.data.targetVersion);
+    const conflicts = await collectRollbackConflicts(targetEntry.policy);
 
     const records = await getAllIdempotencyRecords();
     const conflictingIds: string[] = [];

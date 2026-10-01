@@ -28,6 +28,8 @@ For local development (when `FORTEXA_OPERATOR_WALLETS` is unset), any valid-form
 
 All series are labeled by `route` (Next.js route path, e.g. `/api/decision`) and `method` (uppercase HTTP verb).
 
+Metric names and label keys are enforced by an allowlist at export time (`ALLOWED_METRIC_NAMES` / `ALLOWED_LABEL_KEYS` in [`src/lib/observability/metrics.ts`](../src/lib/observability/metrics.ts)): series carrying any other label (e.g. `destination`, `memo`) or an undocumented name are dropped, and help text is passed through `redactMetricText` before rendering.
+
 | Metric | Type | Description |
 | --- | --- | --- |
 | `fortexa_requests_total` | counter | Total API requests by route/method |

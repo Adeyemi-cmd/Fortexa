@@ -8,7 +8,11 @@ export type AuthSession = {
   userId: string;
   email: string;
   role: AuthRole;
-  roles?: AuthRole[];
+  /**
+   * Session id. Minted once at login and carried forward by refresh, so every
+   * token generation of one login shares it. Logout revokes by this id.
+   */
+  sid: string;
   exp: number;
   gen: number;
   sid: string | null;
@@ -20,7 +24,8 @@ export type VerifySessionTokenOptions = {
 
 export const AUTH_COOKIE_KEY = "fortexa_session";
 
-export const DEFAULT_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
+/** Longest lifetime any session token is issued with. */
+export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
 function getAuthSecret() {
   const secret = process.env.FORTEXA_AUTH_SECRET?.trim();
@@ -44,14 +49,20 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: { email: string; role: AuthRole; roles?: AuthRole[]; userId?: string; expiresInSeconds?: number }) {
+export function createSessionToken(input: {
+  email: string;
+  role: AuthRole;
+  userId?: string;
+  sessionId?: string;
+  expiresInSeconds?: number;
+}) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
-    roles: input.roles ?? [input.role],
-    exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
+    sid: input.sessionId ?? randomUUID(),
+    exp: now + (input.expiresInSeconds ?? SESSION_MAX_AGE_SECONDS),
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));

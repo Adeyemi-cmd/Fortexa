@@ -39,8 +39,9 @@ vi.mock("@/lib/storage/submit-idempotency-store", async (importOriginal) => {
 });
 
 vi.mock("@stellar/stellar-sdk", async () => {
-  const actual =
-    await vi.importActual<typeof import("@stellar/stellar-sdk")>("@stellar/stellar-sdk");
+  const actual = await vi.importActual<typeof import("@stellar/stellar-sdk")>(
+    "@stellar/stellar-sdk",
+  );
 
   class MockServer {
     submitTransaction(tx: unknown) {
@@ -57,14 +58,19 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
-vi.mock("@/lib/storage/audit-store", () => ({ getAuditEntryById: vi.fn() }));
-
-import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Asset,
+  Keypair,
+  Memo,
+  Networks,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as submitSignedPost } from "@/app/api/stellar/submit-signed/route";
-import { createBuildAuthorization, getTransactionHash } from "@/lib/stellar/payment-build-authorization";
-import { getAuditEntryById } from "@/lib/storage/audit-store";
+import { buildDecisionReceipt } from "@/lib/stellar/verify-payment-quote";
 import { IDEMPOTENCY_KEY_ERROR } from "@/lib/validation/schemas";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { resetRateLimitStore } from "@/lib/security/rate-limit";
@@ -98,19 +104,10 @@ function operatorCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
-function submitRequest(body: unknown, extraHeaders: Record<string, string> = {}) {
-  const payload = body as { signedXdr?: string };
-  const authorizedBody = payload.signedXdr ? {
-    ...payload,
-    decisionId,
-    quoteExpiresAt,
-    buildAuthorization: createBuildAuthorization({
-      userId: OPERATOR_USER_ID,
-      decisionId,
-      quoteExpiresAt,
-      transactionHash: getTransactionHash(payload.signedXdr, Networks.TESTNET),
-    }),
-  } : body;
+function submitRequest(
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+) {
   return new NextRequest("http://localhost/api/stellar/submit-signed", {
     method: "POST",
     headers: {
@@ -135,13 +132,31 @@ function buildSignedXdr(amount: string, destination?: string) {
         destination: destination ?? destinationKey.publicKey(),
         asset: Asset.native(),
         amount,
-      })
+      }),
     )
-    .addMemo(Memo.text("fortexa:idempotency-test"))
+    .addMemo(Memo.text("fortexa:idem"))
     .setTimeout(30)
     .build();
   tx.sign(source);
   return tx.toXDR();
+}
+
+function makeDecisionReceiptForXdr(signedXdr: string, amount: string) {
+  const decoded = TransactionBuilder.fromXDR(signedXdr, Networks.TESTNET);
+  const paymentOp = decoded.operations[0] as (typeof decoded.operations)[0] & {
+    destination?: string;
+    amount?: string;
+  };
+  return buildDecisionReceipt({
+    destination: paymentOp.destination ?? OPERATOR_WALLET_KEYPAIR.publicKey(),
+    amountXLM: amount,
+    asset: "native",
+    memo:
+      decoded.memo?.type === "text"
+        ? String(decoded.memo.value ?? "fortexa:idem")
+        : "fortexa:idem",
+    network: "testnet",
+  });
 }
 
 beforeEach(async () => {
@@ -170,7 +185,9 @@ beforeEach(async () => {
 afterAll(async () => {
   const storeDir = process.env.FORTEXA_STORE_DIR;
   if (storeDir && storeDir.startsWith("/tmp/fortexa-idem-")) {
-    await fs.rm(storeDir, { recursive: true, force: true }).catch(() => undefined);
+    await fs
+      .rm(storeDir, { recursive: true, force: true })
+      .catch(() => undefined);
   }
 });
 
@@ -179,11 +196,16 @@ describe("submit-signed idempotency", () => {
     const signedXdr = buildSignedXdr("1.0000000");
     const key = "idem-key-replay-001";
 
-    const first = await submitSignedPost(submitRequest({ signedXdr, idempotencyKey: key }));
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const first = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt, idempotencyKey: key }),
+    );
     expect(first.status).toBe(200);
     const firstBody = await first.json();
 
-    const second = await submitSignedPost(submitRequest({ signedXdr, idempotencyKey: key }));
+    const second = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt, idempotencyKey: key }),
+    );
     expect(second.status).toBe(200);
     expect(second.headers.get("Idempotency-Replayed")).toBe("true");
     const secondBody = await second.json();
@@ -197,11 +219,29 @@ describe("submit-signed idempotency", () => {
     const firstXdr = buildSignedXdr("1.0000000");
     const secondXdr = buildSignedXdr("2.0000000");
 
-    const first = await submitSignedPost(submitRequest({ signedXdr: firstXdr, idempotencyKey: key }));
+    const firstDecisionReceipt = makeDecisionReceiptForXdr(
+      firstXdr,
+      "1.0000000",
+    );
+    const first = await submitSignedPost(
+      submitRequest({
+        signedXdr: firstXdr,
+        decisionReceipt: firstDecisionReceipt,
+        idempotencyKey: key,
+      }),
+    );
     expect(first.status).toBe(200);
 
+    const secondDecisionReceipt = makeDecisionReceiptForXdr(
+      secondXdr,
+      "2.0000000",
+    );
     const conflict = await submitSignedPost(
-      submitRequest({ signedXdr: secondXdr, idempotencyKey: key })
+      submitRequest({
+        signedXdr: secondXdr,
+        decisionReceipt: secondDecisionReceipt,
+        idempotencyKey: key,
+      }),
     );
     expect(conflict.status).toBe(409);
     expect(horizonMocks.submitTransaction).toHaveBeenCalledTimes(1);
@@ -210,10 +250,15 @@ describe("submit-signed idempotency", () => {
   it("preserves current behavior when no idempotency key is provided", async () => {
     const signedXdr = buildSignedXdr("1.0000000");
 
-    const first = await submitSignedPost(submitRequest({ signedXdr }));
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const first = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt }),
+    );
     expect(first.status).toBe(200);
 
-    const second = await submitSignedPost(submitRequest({ signedXdr }));
+    const second = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt }),
+    );
     expect(second.status).toBe(200);
 
     expect(horizonMocks.submitTransaction).toHaveBeenCalledTimes(2);
@@ -223,10 +268,15 @@ describe("submit-signed idempotency", () => {
     const signedXdr = buildSignedXdr("1.0000000");
     const key = "idem-key-header-001";
 
-    const first = await submitSignedPost(submitRequest({ signedXdr }, { "Idempotency-Key": key }));
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const first = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt }, { "Idempotency-Key": key }),
+    );
     expect(first.status).toBe(200);
 
-    const second = await submitSignedPost(submitRequest({ signedXdr }, { "Idempotency-Key": key }));
+    const second = await submitSignedPost(
+      submitRequest({ signedXdr, decisionReceipt }, { "Idempotency-Key": key }),
+    );
     expect(second.status).toBe(200);
     expect(second.headers.get("Idempotency-Replayed")).toBe("true");
     expect(horizonMocks.submitTransaction).toHaveBeenCalledTimes(1);
@@ -236,15 +286,80 @@ describe("submit-signed idempotency", () => {
     const signedXdr = buildSignedXdr("1.0000000");
     const key = "idem-key-header-body-01";
 
-    const first = await submitSignedPost(submitRequest({ signedXdr }, { "Idempotency-Key": key }));
-    expect(first.status).toBe(200);
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    for (const idempotencyKey of [
+      "short",
+      "a".repeat(256),
+      "invalid key!",
+      "bad/key",
+    ]) {
+      const response = await submitSignedPost(
+        submitRequest({ signedXdr, decisionReceipt, idempotencyKey }),
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      if (body.error === IDEMPOTENCY_KEY_ERROR) {
+        expect(body.error).toBe(IDEMPOTENCY_KEY_ERROR);
+      } else {
+        expect(body.details?.fieldErrors?.idempotencyKey?.[0]).toBe(
+          IDEMPOTENCY_KEY_ERROR,
+        );
+      }
+    }
 
-    const second = await submitSignedPost(
-      submitRequest({ signedXdr, idempotencyKey: key }, { "Idempotency-Key": key })
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for too-short idempotency keys via header", async () => {
+    const signedXdr = buildSignedXdr("1.0000000");
+
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const response = await submitSignedPost(
+      submitRequest(
+        { signedXdr, decisionReceipt },
+        { "Idempotency-Key": "short" },
+      ),
     );
-    expect(second.status).toBe(200);
-    expect(second.headers.get("Idempotency-Replayed")).toBe("true");
-    expect(horizonMocks.submitTransaction).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe(IDEMPOTENCY_KEY_ERROR);
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for malformed idempotency keys in the header", async () => {
+    const signedXdr = buildSignedXdr("1.0000000");
+
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const response = await submitSignedPost(
+      submitRequest(
+        { signedXdr, decisionReceipt },
+        { "Idempotency-Key": "bad-key!" },
+      ),
+    );
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.error).toBe(IDEMPOTENCY_KEY_ERROR);
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for oversized idempotency keys", async () => {
+    const signedXdr = buildSignedXdr("1.0000000");
+    const oversizedKey = "a".repeat(256);
+
+    const decisionReceipt = makeDecisionReceiptForXdr(signedXdr, "1.0000000");
+    const response = await submitSignedPost(
+      submitRequest({
+        signedXdr,
+        decisionReceipt,
+        idempotencyKey: oversizedKey,
+      }),
+    );
+    expect(response.status).toBe(400);
+    const body = await response.json();
+    expect(body.details?.fieldErrors?.idempotencyKey?.[0]).toBe(
+      IDEMPOTENCY_KEY_ERROR,
+    );
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
   });
 });
 

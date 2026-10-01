@@ -1,12 +1,8 @@
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import {
-  GENESIS_HASH,
-  computeEntryHash,
-  verifyHashChain,
-} from "@/lib/audit/hash-chain";
-import { runWithDatabase } from "@/lib/storage/db";
+import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
+import { runWithDatabase, runWithDatabaseStrict } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
 

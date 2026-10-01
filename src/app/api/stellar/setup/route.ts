@@ -4,7 +4,9 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
 import { getRequestLogContext, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { getUserWallet, upsertUserWallet, WalletAlreadyBoundError } from "@/lib/storage/user-wallet-store";
+import { STELLAR_PUBLIC_NETWORK_PASSPHRASE } from "@/lib/stellar/network";
+import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
+import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarSetupRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 

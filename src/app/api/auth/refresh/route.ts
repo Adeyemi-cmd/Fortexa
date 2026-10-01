@@ -1,12 +1,9 @@
 import { NextRequest } from "next/server";
 
-import { isLoginLocked, readClientIp } from @"lib/auth/login-lockout";
-import { requireAuth } from @"lib/auth/require-auth";
-import { AUTH_COOKIE_KEY, createSessionToken } from @"lib/auth/session";
-import { jsonWithRequestContext } from @"lib/observability/http";
-import { getRequestLogContext, logInfo, logWarn } from @/lib/observability/logger";
-
-const LOCKED_ERROR = "Account login is temporarily locked due to failed attempts.";
+import { requireActiveAuth } from "@/lib/auth/require-auth";
+import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { jsonWithRequestContext } from "@/lib/observability/http";
+import { getRequestLogContext, logInfo, logWarn } from "@/lib/observability/logger";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -41,6 +38,7 @@ export async function POST(request: NextRequest) {
     email: auth.session.email,
     role: auth.session.role,
     userId: auth.session.userId,
+    sessionId: auth.session.sid,
   });
 
   const response = jsonWithRequestContext(request, {

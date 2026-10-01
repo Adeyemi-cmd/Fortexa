@@ -29,7 +29,7 @@ export const agentActionSchema = z.object(agentActionShape);
  */
 const strictAgentActionSchema = z.strictObject(agentActionShape);
 
-const stellarPublicKeySchema = z
+export const stellarPublicKeySchema = z
   .string()
   .startsWith("G", { message: "Destination must be a Stellar public key." })
   .min(56)
@@ -49,10 +49,19 @@ export const decisionRequestSchema = z
     approvedByHuman: z.boolean().optional(),
     paymentQuoteInput: paymentQuoteInputSchema.optional(),
   })
-  .refine((data) => Boolean(data.scenarioId || data.action), {
-    message: "Either scenarioId or action is required.",
-    path: ["scenarioId"],
-  });
+  .refine(
+    (data) =>
+      Boolean(
+        data.scenarioId ||
+        data.action ||
+        data.paymentQuote ||
+        data.paymentQuoteInput,
+      ),
+    {
+      message: "Either scenarioId, action, or paymentQuote must be provided.",
+      path: ["scenarioId"],
+    },
+  );
 
 export const stellarSetupRequestSchema = z.object({
   provider: z.string().trim().min(1).max(60).optional(),
@@ -70,13 +79,32 @@ export const stellarBuildPaymentRequestSchema = z.object({
   asset: z.enum(["native"]).default("native"),
   memo: z.string().max(28).optional(),
   network: z.enum(["testnet"]).default("testnet"),
+  /**
+   * Optional epoch-millisecond timestamp the client attaches to this
+   * request, checked against the configured clock-skew window (see
+   * src/lib/stellar/request-timestamp-skew.ts). Omitted entirely, the
+   * check is skipped -- existing clients are unaffected.
+   */
+  requestTimestampMs: z.number().finite().optional(),
+});
+
+const decisionReceiptSchema = z.object({
+  destination: stellarPublicKeySchema,
+  amountXLM: z.string().refine(isValidPaymentAmountString, {
+    message: PAYMENT_AMOUNT_ERROR,
+  }),
+  asset: z.enum(["native"]).default("native"),
+  memo: z.string().min(1).max(28),
+  network: z.enum(["testnet"]).default("testnet"),
+  receiptHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .optional(),
 });
 
 export const stellarSubmitSignedRequestSchema = z.object({
   signedXdr: z.string().min(20).max(120000),
-  decisionId: z.string().uuid(),
-  quoteExpiresAt: z.string().datetime(),
-  buildAuthorization: z.string().min(20).max(2048),
+  decisionReceipt: decisionReceiptSchema,
   idempotencyKey: idempotencyKeySchema.optional(),
 });
 
@@ -135,4 +163,6 @@ export type AgentActionInput = z.infer<typeof agentActionSchema>;
 export type AgentPlanInput = z.infer<typeof agentPlanSchema>;
 export type DecisionRequestInput = z.infer<typeof decisionRequestSchema>;
 export type AgentPlanRequestInput = z.infer<typeof agentPlanRequestSchema>;
-export type PolicySimulateRequestInput = z.infer<typeof policySimulateRequestSchema>;
+export type PolicySimulateRequestInput = z.infer<
+  typeof policySimulateRequestSchema
+>;

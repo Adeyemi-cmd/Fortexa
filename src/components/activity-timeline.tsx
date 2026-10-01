@@ -1,6 +1,4 @@
-import { DecisionBadge } from "@/components/decision-badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Clock4, ScrollText } from "lucide-react";
+'use client';
 
 import type { AuditEntry } from "@/lib/types/domain";
 

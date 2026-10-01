@@ -354,11 +354,11 @@ describe("observability metrics", () => {
       recordDecisionOutcome("G" + "A".repeat(55));
       // @ts-expect-error: testing freetext injection guard
       recordDecisionOutcome("APPROVE; wallet=G123");
-      // @ts-expect-error free-text value rejected by the runtime allowlist guard
+      // @ts-expect-error free-text outcome is intentionally invalid
       recordDecisionOutcome("free-text");
-      // @ts-expect-error unknown submit result rejected by the runtime allowlist guard
+      // @ts-expect-error unlisted submit result is intentionally invalid
       recordStellarSubmitResult("wallet_leak_payload");
-      // @ts-expect-error wallet-shaped result rejected by the runtime allowlist guard
+      // @ts-expect-error wallet-like submit result is intentionally invalid
       recordStellarSubmitResult("G12345");
 
       expect(getDecisionOutcomeCounts().size).toBe(0);
@@ -378,9 +378,9 @@ describe("observability metrics", () => {
       recordApiMetric({ route: wallet, method: "POST", statusCode: 200, durationMs: 10 });
       recordApiMetric({ route: `/api/decision?wallet=${wallet}`, method: "POST", statusCode: 200, durationMs: 10 });
       // Also try to inject via outcome/result with wallet-like string (should be dropped)
-      // @ts-expect-error wallet address rejected by the runtime allowlist guard
+      // @ts-expect-error wallet address is intentionally not an outcome
       recordDecisionOutcome(wallet);
-      // @ts-expect-error wallet address rejected by the runtime allowlist guard
+      // @ts-expect-error wallet address is intentionally not a submit result
       recordStellarSubmitResult(wallet);
 
       const output = toPrometheusText();

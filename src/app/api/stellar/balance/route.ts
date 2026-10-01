@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
+import { checkBlocklist } from "@/lib/security/blocklist";
 import { getNativeBalance } from "@/lib/stellar/client";
-import { resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 
 export async function GET(request: NextRequest) {
@@ -60,6 +60,13 @@ export async function GET(request: NextRequest) {
         message: "Link your Stellar wallet address to continue with real on-chain transactions.",
       },
       { status: 200, headers: securityHeadersForRequest(request) }
+    );
+  }
+
+  if (!(await checkBlocklist(publicKey)).allow) {
+    return NextResponse.json(
+      { error: "Wallet address is blocklisted." },
+      { status: 403 }
     );
   }
 

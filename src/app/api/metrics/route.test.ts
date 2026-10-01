@@ -8,7 +8,6 @@ import {
   recordStellarSubmitResult,
   resetMetrics,
 } from "@/lib/observability/metrics";
-import type { MetricsSnapshot } from "@/lib/observability/metrics";
 import { GET } from "@/app/api/metrics/route";
 
 function operatorCookie() {
@@ -134,14 +133,33 @@ describe("/api/metrics route", () => {
 
     const lines = text.trim().split("\n");
     for (const line of lines) {
-      if (requestBucketFamilies.some((family) => line.startsWith(`${family}{`))) {
+      if (
+        line.startsWith("fortexa_requests_total{") ||
+        line.startsWith("fortexa_request_errors_total{") ||
+        line.startsWith("fortexa_request_duration_ms_p95{")
+      ) {
         expect(line).toMatch(/route="[^"]+"/);
         expect(line).toMatch(/method="[^"]+"/);
       }
     }
   });
 
-  it("exports zero-initialised enforcement counters that match the JSON body", async () => {
+  it("emits allow, deny, and submit counters without destination labels or secrets", async () => {
+    const destinationWallet = "GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR";
+    const fixtureSecret = "fixture-secret-must-not-leak";
+
+    recordApiMetric({
+      route: `/api/stellar/pay?destination=${destinationWallet}&memo=paid for coffee&error=${fixtureSecret}`,
+      method: "POST",
+      statusCode: 200,
+      durationMs: 5,
+    });
+    recordApiMetric({
+      route: `/api/stellar/pay/${destinationWallet}`,
+      method: "POST",
+      statusCode: 400,
+      durationMs: 5,
+    });
     recordDecisionOutcome("APPROVE");
     recordDecisionOutcome("BLOCK");
     recordRateLimitRejection();

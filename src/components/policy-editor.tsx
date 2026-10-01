@@ -533,11 +533,7 @@ export function PolicyEditor({
     }
   }
 
-  async function handleImportPolicy(importedPolicy: PolicyConfig) {
-    if (networkMismatch || serverNetworkMatches !== true || hasSensitiveField(importedPolicy)) {
-      setStatus("Import is disabled because the network differs or the policy contains a sensitive field.");
-      return;
-    }
+  async function handleImportPolicy(document: PolicyExport) {
     if (!isOperator) {
       throw new Error("Viewer role is read-only. Login as operator to import policy.");
     }
@@ -546,11 +542,8 @@ export function PolicyEditor({
     try {
       const response = await fetch("/api/policy", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Fortexa-Network-Fingerprint": networkFingerprint,
-        },
-        body: JSON.stringify(importedPolicy),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(document),
       });
 
       const payload = (await response.json()) as PolicyResponse;

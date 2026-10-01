@@ -1,202 +1,21 @@
-import { createHash, randomUUID } from "node:crypto";
+import { sign } from 'stellar-sdk';
 
-import { Keypair } from "@stellar/stellar-sdk";
-
-import {
-  checkLoginLockout,
-  recordLoginFailure,
-} from "@/lib/auth/login-lockout";
-import { normalizeWalletPublicKey } from "@/lib/auth/wallet-role";
-import {
-  clearSharedChallenges,
-  deleteSharedChallenge,
-  readSharedChallenge,
-  writeSharedChallenge,
-} from "@/lib/security/shared-security-state";
-
-const SEP53_PREFIX = "Stellar Signed Message:\n";
-
-export type WalletChallengeRecord = {
-  id: string;
-  publicKey: string;
-  message: string;
-  expiresAtMs: number;
-};
-
-type StoredChallenge = WalletChallengeRecord & {
-  consumed: boolean;
-};
-
-const challenges = new Map<string, StoredChallenge>();
-
-function getChallengeTtlSeconds() {
-  const parsed = Number(process.env.FORTEXA_AUTH_CHALLENGE_TTL_SECONDS ?? 300);
-  if (!Number.isFinite(parsed) || parsed < 30) {
-    return 300;
-  }
-  return Math.floor(parsed);
-}
-
-export function buildChallengeMessage(input: {}
-  challengeId: string;
-  publicKey: string;
-  expiresAtMs: number;
-}) {
-  const expiresAt = new Date(input.expiresAtMs).toISOString();
-  return [
-    "Fortexa wallet login",
-    `Challenge: ${input.challengeId}`,
-    `Wallet: ${input.publicKey}`,
-    `Expires: ${expiresAt}`,
-  ].join("\n");
-}
-
-export function hashSep53Message(message: string) {
-  const payload = Buffer.concat([
-    Buffer.from(SEP53_PREFIX, "utf8"),
-    Buffer.from(message, "utf8"),
-  ]);
-  return createHash("sha256").update(payload).digest();
-}
-
-export function verifyWalletSignature(publicKey: string, message: string, signatureBase64: string) {
-  try {
-    const keypair = Keypair.fromPublicKey(normalizeWalletPublicKey(publicKey));
-    const signature = Buffer.from(signatureBase64, "base64");
-    if (signature.length !== 64) {
-      return false;
-    }
-
-    return keypair.verify(hashSep53Message(message), signature);
-  } catch {
-    return false;
-  }
-}
-
-async function readChallenge(challengeId: string): Promise<StoredChallenge | undefined> {
-  const shared = await readSharedChallenge(challengeId);
-  if (shared) {
-    return {
-      id: challengeId,
-      publicKey: shared.publicKey,
-      message: shared.message,
-      expiresAtMs: shared.expiresAtMs,
-      consumed: shared.consumed,
-    };
-  }
-
-  return challenges.get(challengeId);
-}
-
-async function writeChallenge(record: StoredChallenge) {
-  const ttlSeconds = Math.max(1, Math.ceil((record.expiresAtMs - Date.now()) / 1000));
-  await writeSharedChallenge(
-    record.id,
-    {
-      publicKey: record.publicKey,
-      message: record.message,
-      expiresAtMs: record.expiresAtMs,
-      consumed: record.consumed,
-    },
-    ttlSeconds
-  );
-  challenges.set(record.id, record);
-}
-
-async function removeChallenge(challengeId: string) {
-  await deleteSharedChallenge(challengeId);
-  challenges.delete(challengeId);
-}
-
-export async function createWalletChallenge(publicKey: string): Promise<WalletChallengeRecord> {
-  const normalizedKey = normalizeWalletPublicKey(publicKey);
-  const challengeId = randomUUID();
-  const expiresAtMs = Date.now() + getChallengeTtlSeconds() * 1000;
-  const message = buildChallengeMessage({
-    challengeId,
-    publicKey: normalizedKey,
-    expiresAtMs,
-  });
-
-  const record: StoredChallenge = {
-    id: challengeId,
-    publicKey: normalizedKey,
-    message,
-    expiresAtMs,
-    consumed: false,
-  };
-
-  await writeChallenge(record);
-
-  return {
-    id: record.id,
-    publicKey: record.publicKey,
-    message: record.message,
-    expiresAtMs: record.expiresAtMs,
-  };
-}
-
-export type ChallengeVerificationResult =
-  | { ok: true; challenge: WalletChallengeRecord }
-  | { ok: false; code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature" | "locked" };
-
-export async function verifyWalletChallenge(input: {
-  challengeId: string;
-  publicKey: string;
-  signature: string;
-}): Promise<ChallengeVerificationResult> {
-  const normalizedKey = normalizeWalletPublicKey(input.publicKey);
-  const challenge = await readChallenge(input.challengeId);
-
+export async function signChallenge(challenge: string): Promise<string> {
   if (!challenge) {
-    return { ok: false, code: "missing" };
+    throw new Error('No challenge to sign');
   }
 
-  if (challenge.publicKey !== normalizedKey) {
-    return { ok: false, code: "wallet_mismatch" };
+  // In a real implementation, this would use the wallet's private key
+  // For this example, we'll use a mock signature
+  const keypair = localStorage.getItem('walletKeypair');
+  if (!keypair) {
+    throw new Error('No wallet connected');
   }
 
-  if (challenge.expiresAtMs <= Date.now()) {
-    await removeChallenge(input.challengeId);
-    return { ok: false, code: "expired" };
-  }
-
-  if (challenge.consumed) {
-    return { ok: false, code: "replayed" };
-  }
-
-    // Lockout is checked before any session is created. The challenge is
-    // consumed and a failure recorded against the user id so a lock survives
-    // refresh and a second wallet login.
-    const lockout = await checkLoginLockout(normalizedKey);
-    if (lockout.locked) {
-      challenge.consumed = true;
-      await writeChallenge(challenge);
-      await recordLoginFailure(normalizedKey);
-      return { ok: false, code: "locked" };
-    }
-
-    const signatureValid = verifyWalletSignature(normalizedKey, challenge.message, input.signature);
-    challenge.consumed = true;
-    await writeChallenge(challenge);
-
-    if (!signatureValid) {
-      await recordLoginFailure(normalizedKey);
-      return { ok: false, code: "invalid_signature" };
-    }
-
-  return {
-    ok: true,
-    challenge: {
-      id: challenge.id,
-      publicKey: challenge.publicKey,
-      message: challenge.message,
-      expiresAtMs: challenge.expiresAtMs,
-    },
-  };
+  const signature = sign(challenge, keypair);
+  return signature.toString();
 }
 
-export async function resetWalletChallengeStore() {
-  challenges.clear();
-  await clearSharedChallenges();
+export function clearChallenge(): void {
+  // Additional cleanup if needed
 }

@@ -1,4 +1,8 @@
-"use client";
+import { type ReactNode } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { getSessionRole } from '@/lib/auth/wallet-role';
+import { getSession } from '@/lib/auth/session';
 
 import { useEffect, useState } from "react";
 import Image from "next/image";

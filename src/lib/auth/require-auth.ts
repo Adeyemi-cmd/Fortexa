@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getSessionFromRequest, type AuthRole } from "@/lib/auth/session";
-import { applySecurityHeaders } from "@/lib/security/headers";
+import { isSessionRevoked } from "@/lib/auth/session-revocation";
 
 type RequireAuthOptions = {
   allowedRoles?: AuthRole[];
@@ -32,7 +32,7 @@ export function requireAuth(request: NextRequest, options?: RequireAuthOptions) 
 
     return {
       ok: false as const,
-      response: applySecurityHeaders(response, requestId),
+      response: unauthorizedResponse(requestId),
     };
   }
 
