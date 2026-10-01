@@ -4,6 +4,7 @@ export const PLAN_ERRORS = {
   EMPTY_RESPONSE: "PLAN_EMPTY_RESPONSE",
   UNSAFE_TOOL: "PLAN_UNSAFE_TOOL",
   UNSAFE_DOMAIN: "PLAN_UNSAFE_DOMAIN",
+  ENGINE_DENIED: "PLAN_ENGINE_DENIED",
   PROVIDER_UNAVAILABLE: "PLAN_PROVIDER_UNAVAILABLE",
 } as const;
 
@@ -15,6 +16,7 @@ export const PLAN_ERROR_MESSAGES: Record<PlanErrorCode, string> = {
   [PLAN_ERRORS.EMPTY_RESPONSE]: "Model returned an empty response for the agent plan.",
   [PLAN_ERRORS.UNSAFE_TOOL]: "Agent plan references a tool that is not permitted.",
   [PLAN_ERRORS.UNSAFE_DOMAIN]: "Agent plan targets a domain that is not permitted.",
+  [PLAN_ERRORS.ENGINE_DENIED]: "Agent plan contains a payment the decision engine denied.",
   [PLAN_ERRORS.PROVIDER_UNAVAILABLE]: "The plan generation provider is currently unavailable.",
 };
 

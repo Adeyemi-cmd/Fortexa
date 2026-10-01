@@ -90,7 +90,14 @@ describe("policy store versioning", () => {
     expect(updated.version).toBe(startVersion + 1);
 
     const afterHistory = await getPolicyHistory(100);
-    expect(afterHistory.length).toBe(initialHistoryCount + 1);
+    // A legitimate bump appends exactly one history entry. With more than
+    // `limit` entries stored, the returned window slides forward one slot
+    // (newest dropped == oldest gained), so the count is unchanged; below
+    // the limit it grows by one.
+    const expectedCount =
+      initialHistoryCount >= 100 ? initialHistoryCount : initialHistoryCount + 1;
+    expect(afterHistory.length).toBe(expectedCount);
+    expect(afterHistory[0]?.version).toBe(updated.version);
   });
 
   it("saves that conflict do NOT pollute the version history (rejection observed, history unchanged)", async () => {
@@ -117,7 +124,13 @@ describe("policy store versioning", () => {
 
     const historyAfter = await getPolicyHistory(100);
     // +1 from the legitimate bump, no extra row for the rejected attempt.
-    expect(historyAfter.length).toBe(historyBefore + 1);
+    // (The newest-first window keeps the count fixed once history exceeds
+    // the limit; the newest entry's version proves the bump was recorded.)
+    const bumpRecorded = historyAfter[0]?.version === nowVersion;
+    expect(bumpRecorded).toBe(true);
+    expect(historyAfter.length).toBe(
+      historyBefore >= 100 ? historyBefore : historyBefore + 1,
+    );
     expect((await getPolicyConfig()).version).toBe(nowVersion);
   });
 

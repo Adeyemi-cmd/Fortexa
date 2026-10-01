@@ -98,6 +98,7 @@ describe("policy migration fixtures — normalizePolicy", () => {
         maxToolCallsPerDay: defaultPolicyConfig.maxToolCallsPerDay,
         riskThreshold: defaultPolicyConfig.riskThreshold,
         allowedHours: defaultPolicyConfig.allowedHours,
+        memoRequiredDestinations: defaultPolicyConfig.memoRequiredDestinations,
       });
     });
   });
