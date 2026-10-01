@@ -115,6 +115,76 @@ describe("observability metrics", () => {
     expect(getStellarSubmitResultCounts().size).toBe(0);
   });
 
+  describe("#205 redaction-aware metrics", () => {
+    it("does not place Stellar addresses or memos in route labels", () => {
+      const destination = "GA7QYNF7SOWQ3GLR2ZGMGIRKJ7F6NCWKUX6PS7LJVCUJUJQG2U5F6Z7P";
+      recordApiMetric({
+        route: `/api/decision?destination=${destination}&memo=invoice-8817`,
+        method: "POST",
+        statusCode: 500,
+        durationMs: 10,
+      });
+      recordApiMetric({
+        route: `memo ${destination} failed`,
+        method: "POST",
+        statusCode: 500,
+        durationMs: 10,
+      });
+
+      const output = toPrometheusText();
+      expect(output).not.toContain(destination);
+      expect(output).not.toContain("invoice-8817");
+
+      const snapshot = getMetricsSnapshot();
+      for (const r of snapshot.routes) {
+        expect(r.route).not.toContain(destination);
+        expect(r.route).not.toContain("invoice-8817");
+        expect(ALLOWED_ROUTES.has(r.route)).toBe(true);
+      }
+    });
+
+    it("keeps incrementing submit failure counters when errors are fully redacted", () => {
+      const signedXdr = "A".repeat(120);
+
+      // Horizon failure whose message is entirely a signed XDR blob: logging
+      // redacts it, but the stable counter must still move.
+      recordStellarSubmitResult("horizon_failure");
+      recordStellarSubmitResult("horizon_failure");
+      recordStellarSubmitResult("validation_failure");
+
+      const counts = getStellarSubmitResultCounts();
+      expect(counts.get("horizon_failure")).toBe(2);
+      expect(counts.get("validation_failure")).toBe(1);
+      expect(signedXdr.length).toBe(120); // fixture sanity
+
+      const output = toPrometheusText();
+      expect(output).toContain('result="horizon_failure"');
+      expect(output).not.toContain(signedXdr);
+    });
+
+    it("keeps decision outcome counters incrementing when errors are redacted", () => {
+      recordDecisionOutcome("BLOCK");
+      recordDecisionOutcome("BLOCK");
+      recordDecisionOutcome("REQUIRE_APPROVAL");
+
+      const counts = getDecisionOutcomeCounts();
+      expect(counts.get("BLOCK")).toBe(2);
+      expect(counts.get("REQUIRE_APPROVAL")).toBe(1);
+    });
+
+    it("never emits metric label values longer than route allowlist entries", () => {
+      const longBlob = "x".repeat(300);
+      recordApiMetric({ route: longBlob, method: "POST", statusCode: 200, durationMs: 5 });
+      recordApiMetric({ route: `/api/decision?xdr=${longBlob}`, method: "POST", statusCode: 200, durationMs: 5 });
+
+      const snapshot = getMetricsSnapshot();
+      for (const r of snapshot.routes) {
+        expect(r.route.length).toBeLessThanOrEqual(128);
+        expect(r.route).not.toContain(longBlob);
+      }
+    });
+  });
+
   describe("allowlist and normalization (SCF high)", () => {
     it("defines a fixed allowlist of low-cardinality routes and methods", () => {
       expect(ALLOWED_ROUTES.has("/api/decision")).toBe(true);
