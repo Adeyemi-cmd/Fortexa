@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
+import { canPassDecisionGate, evaluateDecision } from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -11,6 +11,7 @@ import {
   logWarn,
 } from "@/lib/observability/logger";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
+import { redactSensitiveFields } from "@/lib/observability/redact";
 import { demoScenarios } from "@/lib/scenarios/seed";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
@@ -62,6 +63,17 @@ export async function POST(request: NextRequest) {
         startedAtMs,
         status: 401,
         body: { error: "No active wallet mapping found for this user." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (!(await canPassDecisionGate(userId))) {
+      logWarn("Decision route rejected revoked wallet", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 401,
+        body: { error: "Wallet access has been revoked." },
         headers: rateLimitHeaders(rate),
       });
     }
@@ -132,6 +144,7 @@ export async function POST(request: NextRequest) {
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
+      ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}),
       ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
       (body.paymentQuote || body.paymentQuoteInput)
         ? {
@@ -176,9 +189,15 @@ export async function POST(request: NextRequest) {
       headers: rateLimitHeaders(rate),
     });
   } catch (error) {
+    // #205: pass error detail through the shared observability redactor so
+    // destination addresses, memos, and secret-bearing values never reach logs.
+    // The API metric for this 500 response is still recorded by
+    // jsonWithRequestContext — redaction must not suppress it.
+    const redactedDetail =
+      error instanceof Error ? redactSensitiveFields(error.message) : "unknown";
     logError("Decision route internal error", {
       ...context,
-      detail: error instanceof Error ? error.message : "unknown",
+      detail: redactedDetail,
     });
     return jsonWithRequestContext(request, {
       route: "/api/decision",
