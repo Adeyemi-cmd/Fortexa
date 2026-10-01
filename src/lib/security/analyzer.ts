@@ -156,6 +156,7 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     const blocklist = await fetchBlocklist();
     return { blocklist, status: { blocked: false, timedOut: false } };

@@ -1,6 +1,7 @@
 import type { ZodError } from "zod";
 
-import { logWarn, type LogContext } from "@/lib/observability/logger";
+import type { LogContext } from "@/lib/observability/logger";
+import { logWarn } from "@/lib/observability/logger";
 import { redactSensitiveFields } from "@/lib/observability/redact";
 
 export const SENSITIVE_FIELD_KEYS = new Set([
@@ -20,6 +21,9 @@ export const SENSITIVE_FIELD_KEYS = new Set([
 ]);
 
 const PUBLIC_SENSITIVE_FIELD_MESSAGE = "Invalid value.";
+
+// Memo values carry free-text user content; never log them (issue #205).
+SENSITIVE_FIELD_KEYS.add("memo");
 
 function fieldPathHasSensitiveKey(fieldPath: string): boolean {
   return fieldPath.split(".").some((segment) => SENSITIVE_FIELD_KEYS.has(segment.toLowerCase()));
@@ -42,7 +46,7 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = messages ?? [];
+      fieldErrors[field] = (messages as string[] | undefined) ?? [];
     }
   }
 
@@ -51,6 +55,8 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     fieldErrors,
   };
 }
+
+const HORIZON_RESULT_CODE_PATTERN = /\btx_[a-z0-9_]+\b|\bop_[a-z0-9_]+\b/gi;
 
 export function logValidationFailure(
   message: string,
@@ -62,10 +68,11 @@ export function logValidationFailure(
     message,
     redactSensitiveFields({
       ...context,
-      validation: error.flatten(),
+      validation: error.flatten() as unknown as Record<string, unknown>,
       body: rawBody,
-      // Log context carries nested objects (flattened validation, raw body)
-      // beyond the primitive index signature of LogContext.
+      horizonResultCodes: Array.from(
+        new Set((JSON.stringify(rawBody ?? {}) + " " + error.message).match(HORIZON_RESULT_CODE_PATTERN) ?? []),
+      ),
     }) as unknown as LogContext,
   );
 }

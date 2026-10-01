@@ -11,6 +11,7 @@ import {
   logWarn,
 } from "@/lib/observability/logger";
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
+import { redactSensitiveFields } from "@/lib/observability/redact";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
@@ -62,6 +63,10 @@ const HORIZON_OP_ERRORS: Record<string, HorizonErrorContext> = {
   op_no_destination: {
     explanation: "The destination account does not exist on the network.",
     nextStep: "Verify the destination address or ensure the account is funded.",
+    // #205: op_no_destination can echo back the user-supplied destination
+    // address in Horizon error detail. Keep the operator-facing text, but the
+    // log path passes raw error.message through redactSensitiveFields so the
+    // address itself never reaches logs.
   },
   op_underfunded: {
     explanation:
@@ -533,11 +538,17 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const formatted = formatSubmitError(error);
     const category = normalizeHorizonError(formatted.txCode);
-    logError("Submit signed internal error", {
+    // #205: formatSubmitError embeds raw Horizon error.message (which can carry
+    // the signed XDR envelope, destination addresses, or memo values) into
+    // formatted.message. Pass the log detail through the shared observability
+    // redactor so secrets, signed XDR, and payment metadata never reach logs.
+    // recordStellarSubmitResult("horizon_failure") below is unconditional so
+    // stable counters keep incrementing even when the error is fully redacted.
+    logError("Submit signed internal error", redactSensitiveFields({
       ...context,
       detail: formatted.message,
       horizonCategory: category,
-    });
+    }));
     recordStellarSubmitResult("horizon_failure");
     return jsonWithRequestContext(request, {
       route: "/api/stellar/submit-signed",
