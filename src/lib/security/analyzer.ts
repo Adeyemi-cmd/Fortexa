@@ -19,16 +19,6 @@ export const defaultAnalyzerConfig: AnalyzerConfig = {
   blocklistTimeoutMs: 5000,
 };
 
-/** Get analyzer config from environment or use defaults. */
-function getAnalyzerConfig(): AnalyzerConfig {
-  return {
-    blocklistTimeoutMs: parseInt(
-      process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS || "5000",
-      10,
-    ),
-  };
-}
-
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
   /send\s+funds\s+to/i,
@@ -155,6 +145,18 @@ function blocklistCheck(
     ];
   }
   return [];
+}
+
+function isTimeoutFailure(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout/i.test(message);
 }
 
 /**

@@ -47,7 +47,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const challenge = await createWalletChallenge(parsed.data.publicKey);
+    const origin = request.headers.get("origin") ?? new URL(request.url).origin;
+    const challenge = await createWalletChallenge(parsed.data.publicKey, { origin });
 
     logInfo("Auth challenge created", { ...context, wallet: challenge.publicKey, challengeId: challenge.id });
 
