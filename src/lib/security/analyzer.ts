@@ -160,20 +160,30 @@ async function fetchBlocklistWithTimeout(): Promise<{
   status: BlocklistFetchStatus;
 }> {
   const { blocklistTimeoutMs } = getAnalyzerConfig();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
 
   try {
     const blocklist = await fetchBlocklist();
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
+    // fetchBlocklist records the failure in its health before rethrowing, so
+    // read the health back to classify the failure instead of the error alone.
     const health = getBlocklistHealth();
     const error =
       health.lastError ??
       (err instanceof Error ? err.message : "Unknown fetch error");
     const timedOut =
-      (err instanceof Error &&
-        (err.name === "AbortError" || err.name === "TimeoutError")) ||
-      /abort|timed? ?out/i.test(error);
-    return { blocklist: [], status: { blocked: true, timedOut, error } };
+      controller.signal.aborted ||
+      (err instanceof Error && err.name === "AbortError") ||
+      /abort|timeout/i.test(error);
+
+    return {
+      blocklist: [],
+      status: { blocked: true, timedOut, error },
+    };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
