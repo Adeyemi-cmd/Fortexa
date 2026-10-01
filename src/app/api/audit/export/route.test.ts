@@ -13,6 +13,7 @@
  */
 
 import { promises as fs } from "node:fs";
+import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
@@ -27,6 +28,7 @@ vi.hoisted(() => {
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { GET } from "@/app/api/audit/export/route";
 import { appendAuditEntry, resetAuditState } from "@/lib/storage/audit-store";
+import { getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DecisionType } from "@/lib/types/domain";
 
 const OPERATOR_USER = "operator-audit-export";
@@ -331,6 +333,203 @@ describe("/api/audit/export route", () => {
       const body = await response.text();
       expect(body).toContain("viewer-seeded");
       expect(body).toContain("other-seeded");
+    });
+  });
+
+  describe("hash-chain verification gates every export body", () => {
+    const CHAIN_USER = "operator-chain-export";
+    const FIXTURE_PATH = path.join(
+      process.cwd(),
+      "scripts",
+      "fixtures",
+      "valid-chain-csv-quoting.json"
+    );
+    const CSV_HEADERS = [
+      "userId",
+      "id",
+      "timestamp",
+      "decision",
+      "actionId",
+      "actionName",
+      "domain",
+      "amountXLM",
+      "explanation",
+      "entryHash",
+      "previousHash",
+    ];
+
+    let fixtureEntries: AuditEntry[];
+
+    /** Minimal RFC 4180 reader so quoted commas/quotes can be asserted on. */
+    function parseCsv(input: string): string[][] {
+      const rows: string[][] = [];
+      let row: string[] = [];
+      let cell = "";
+      let inQuotes = false;
+      const text = input.endsWith("\n") ? input.slice(0, -1) : input;
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i]!;
+        if (inQuotes) {
+          if (char === '"') {
+            if (text[i + 1] === '"') {
+              cell += '"';
+              i++;
+            } else {
+              inQuotes = false;
+            }
+          } else {
+            cell += char;
+          }
+        } else if (char === '"') {
+          inQuotes = true;
+        } else if (char === ",") {
+          row.push(cell);
+          cell = "";
+        } else if (char === "\n") {
+          row.push(cell);
+          rows.push(row);
+          row = [];
+          cell = "";
+        } else {
+          cell += char;
+        }
+      }
+      row.push(cell);
+      rows.push(row);
+      return rows;
+    }
+
+    function chainCookie() {
+      const token = createSessionToken({
+        email: "operator@fortexa.local",
+        role: "operator",
+        userId: CHAIN_USER,
+        expiresInSeconds: 120,
+      });
+      return `${AUTH_COOKIE_KEY}=${token}`;
+    }
+
+    /** Merge one user's entries into the file store so other tests keep theirs. */
+    async function seedUserEntries(userId: string, entries: AuditEntry[]) {
+      const storePath = getFortexaStorePath("audit.json");
+      await fs.mkdir(path.dirname(storePath), { recursive: true });
+      let store: {
+        auditByUser: Record<string, AuditEntry[]>;
+        usageByUser: Record<string, unknown>;
+      } = { auditByUser: {}, usageByUser: {} };
+      try {
+        store = JSON.parse(await fs.readFile(storePath, "utf8"));
+      } catch {
+        // Fresh store — keep the empty default.
+      }
+      store.auditByUser ??= {};
+      store.auditByUser[userId] = entries;
+      await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf8");
+    }
+
+    beforeAll(async () => {
+      const raw = JSON.parse(await fs.readFile(FIXTURE_PATH, "utf8")) as {
+        entries: AuditEntry[];
+      };
+      fixtureEntries = raw.entries;
+    });
+
+    it("valid chain emits one row per audit event, keeping commas/quotes in one cell", async () => {
+      await seedUserEntries(CHAIN_USER, fixtureEntries);
+
+      const response = await GET(
+        request("http://localhost/api/audit/export?format=csv&scope=mine", chainCookie())
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+
+      const rows = parseCsv(await response.text());
+      expect(rows[0]).toEqual(CSV_HEADERS);
+      expect(rows).toHaveLength(fixtureEntries.length + 1);
+
+      // Rows are compared to the verifier fixture itself (order-independent:
+      // the store returns newest-first).
+      const header = rows[0]!;
+      const idIdx = header.indexOf("id");
+      const explanationIdx = header.indexOf("explanation");
+      const actionNameIdx = header.indexOf("actionName");
+      const decisionIdx = header.indexOf("decision");
+
+      const rowsById = new Map(
+        rows.slice(1).map((row) => [row[idIdx], row] as const)
+      );
+      fixtureEntries.forEach((entry) => {
+        const row = rowsById.get(entry.id);
+        expect(row).toBeDefined();
+        expect(row![explanationIdx]).toBe(entry.explanation);
+        expect(row![actionNameIdx]).toBe(entry.action.name);
+        expect(row![decisionIdx]).toBe(entry.decision);
+      });
+
+      // The hostile fixture row must survive as a single cell.
+      const hostileRow = rowsById.get("entry-2")!;
+      expect(hostileRow[explanationIdx]).toBe('Approved by ops, note: "temporary exception"');
+      expect(hostileRow[actionNameIdx]).toBe('pay, "urgent"');
+    });
+
+    it("a broken chain produces no CSV body and returns the verifier error", async () => {
+      const tampered = fixtureEntries.map((entry, index) =>
+        index === fixtureEntries.length - 1
+          ? { ...entry, explanation: "tampered after the fact" }
+          : entry
+      );
+      await seedUserEntries(CHAIN_USER, tampered);
+
+      const response = await GET(
+        request("http://localhost/api/audit/export?format=csv&scope=mine", chainCookie())
+      );
+
+      expect(response.status).toBe(422);
+      const body = await response.text();
+      expect(body).not.toContain(CSV_HEADERS.join(","));
+      expect(body).not.toContain("entry-1");
+
+      const payload = JSON.parse(body) as { error: string; code: string };
+      expect(payload.code).toBe("audit_chain_verification_failed");
+      expect(payload.error).toContain("verification");
+    });
+
+    it("JSON and CSV refuse together on a broken chain", async () => {
+      const tampered = fixtureEntries.map((entry, index) =>
+        index === fixtureEntries.length - 1
+          ? { ...entry, explanation: "tampered after the fact" }
+          : entry
+      );
+      await seedUserEntries(CHAIN_USER, tampered);
+
+      const jsonResponse = await GET(
+        request("http://localhost/api/audit/export?format=json&scope=mine", chainCookie())
+      );
+      const csvResponse = await GET(
+        request("http://localhost/api/audit/export?format=csv&scope=mine", chainCookie())
+      );
+
+      expect(jsonResponse.status).toBe(422);
+      expect(csvResponse.status).toBe(422);
+      expect(await csvResponse.text()).not.toContain(CSV_HEADERS.join(","));
+    });
+
+    it("scope=all refuses when any user's chain is broken", async () => {
+      const tampered = fixtureEntries.map((entry, index) =>
+        index === fixtureEntries.length - 1
+          ? { ...entry, explanation: "tampered after the fact" }
+          : entry
+      );
+      await seedUserEntries(CHAIN_USER, tampered);
+
+      const response = await GET(
+        request("http://localhost/api/audit/export?format=csv&scope=all", chainCookie())
+      );
+
+      expect(response.status).toBe(422);
+      const payload = (await response.json()) as { code: string };
+      expect(payload.code).toBe("audit_chain_verification_failed");
     });
   });
 });

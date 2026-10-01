@@ -44,7 +44,7 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = fieldMessages;
+      fieldErrors[field] = Array.isArray(messages) ? messages.map(String) : [];
     }
   }
 

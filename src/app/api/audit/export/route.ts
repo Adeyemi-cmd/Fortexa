@@ -4,31 +4,46 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { listAllAuditEntriesByUser, listAuditEntries, validateAuditFilter } from "@/lib/storage/audit-store";
-import { sanitizeCsvCell } from "@/utils/csv.utils";
+import { toCsv } from "@/utils/csv.utils";
+import type { CsvRow } from "@/utils/csv.utils";
 import type { AuditFilter } from "@/lib/storage/audit-store";
 import { redactAuditExportEntriesByUser, redactAuditExportPayload } from "@/lib/audit/redact";
-import {
-  AuditChainError,
-  DEFAULT_MAX_CHAIN_ROWS,
-  getChainBoundaries,
-  verifyAuditChain,
-} from "@/lib/audit/hash-chain";
+import { AuditChainError, verifyAuditChain } from "@/lib/audit/hash-chain";
+import type { ChainVerificationResult } from "@/lib/audit/hash-chain";
 
-function toCsv(rows: Array<Record<string, string | number | boolean | null>>) {
-  if (rows.length === 0) {
-    return "";
-  }
+const AUDIT_CHAIN_VERIFICATION_FAILED = "audit_chain_verification_failed";
 
-  const headers = Object.keys(rows[0] ?? {});
-  const escape = (value: string) => `"${value.replaceAll("\"", "\"\"")}"`;
-  const lines = [headers.join(",")];
+/**
+ * Turns a verifier failure into an error response. No CSV is ever written when
+ * this path is taken, so a broken chain can never be published in either
+ * format. The row-cap violation is a client error (413); a broken chain is an
+ * unprocessable export (422).
+ */
+function chainErrorResponse(
+  request: NextRequest,
+  startedAtMs: number,
+  error: AuditChainError,
+) {
+  const status = error.code === "audit_chain_row_cap_exceeded" ? 413 : 422;
+  return jsonWithRequestContext(request, {
+    route: "/api/audit/export",
+    startedAtMs,
+    status,
+    body: {
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    },
+  });
+}
 
-  for (const row of rows) {
-    const line = headers.map((header) => escape(sanitizeCsvCell(row[header] ?? ""))).join(",");
-    lines.push(line);
-  }
-
-  return `${lines.join("\n")}\n`;
+function chainFailureDetails(result: Extract<ChainVerificationResult, { valid: false }>) {
+  return {
+    entryId: result.entryId ?? null,
+    index: result.index ?? null,
+    checkedCount: result.checkedCount,
+    legacyCount: result.legacyCount,
+  };
 }
 
 function chainErrorResponse(
@@ -106,25 +121,21 @@ export async function GET(request: NextRequest) {
     if (exportAll) {
       const all = await listAllAuditEntriesByUser(filter);
 
-      // Verify every user's chain before writing any response body.
-      const verifiedByUser: Record<string, ReturnType<typeof verifyAuditChain>> = {};
-      for (const [userId, entries] of Object.entries(all)) {
-        verifiedByUser[userId] = verifyAuditChain(entries);
-        const result = verifiedByUser[userId]!.result;
-        if (!result.valid) {
-          throw new AuditChainError(
-            "audit_chain_verification_failed",
-            `Audit chain for user "${userId}" failed verification: ${result.reason}`,
-            {
-              userId,
-              entryId: result.entryId ?? null,
-              index: result.index ?? null,
-              checkedCount: result.checkedCount,
-              legacyCount: result.legacyCount,
-            },
-          );
-        }
-      }
+      // Verify every user's chain before any encoder runs. The verifier enforces
+      // the shared row cap and both formats abort together on a broken chain.
+      const verifiedByUser = Object.fromEntries(
+        Object.entries(all).map(([userId, entries]) => {
+          const verified = verifyAuditChain(entries);
+          if (!verified.result.valid) {
+            throw new AuditChainError(
+              AUDIT_CHAIN_VERIFICATION_FAILED,
+              `Audit chain for user "${userId}" failed verification: ${verified.result.reason}`,
+              { userId, ...chainFailureDetails(verified.result) },
+            );
+          }
+          return [userId, verified] as const;
+        }),
+      );
 
       if (format === "json") {
         logInfo("Audit export success (all/json)", { ...context, userId: auth.session.userId });
@@ -146,7 +157,7 @@ export async function GET(request: NextRequest) {
         });
       }
 
-      const rows: Array<Record<string, string | number | boolean | null>> = [];
+      const rows: CsvRow[] = [];
       for (const [userId, entries] of Object.entries(all)) {
         for (const entry of entries) {
           rows.push({
@@ -178,20 +189,14 @@ export async function GET(request: NextRequest) {
 
     const mine = await listAuditEntries(auth.session.userId, filter);
 
-    // Verify the chain from genesis through the last exported row before
-    // writing the body. The row cap is enforced here as well.
+    // Verify the chain before the CSV encoder runs so a rewritten log can never
+    // be published. The row cap is enforced by the same verifier as the JSON path.
     const verified = verifyAuditChain(mine);
     if (!verified.result.valid) {
-      const result = verified.result;
       throw new AuditChainError(
-        "audit_chain_verification_failed",
-        `Audit chain failed verification: ${result.reason}`,
-        {
-          entryId: result.entryId ?? null,
-          index: result.index ?? null,
-          checkedCount: result.checkedCount,
-          legacyCount: result.legacyCount,
-        },
+        AUDIT_CHAIN_VERIFICATION_FAILED,
+        `Audit chain failed verification: ${verified.result.reason}`,
+        chainFailureDetails(verified.result),
       );
     }
 
@@ -210,7 +215,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const rows = mine.map((entry) => ({
+    const rows: CsvRow[] = mine.map((entry) => ({
       userId: auth.session.userId,
       id: entry.id,
       timestamp: entry.timestamp,

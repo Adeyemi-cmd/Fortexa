@@ -230,7 +230,9 @@ export async function listAuditEntries(userId: string, filter?: AuditFilter) {
   const store = await readStore();
   const entries = store.auditByUser[userId] ?? [];
   return applyFilter(
-    [...entries].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+    [...entries].sort((a, b) =>
+      a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+    ),
     filter,
   );
 }
@@ -271,7 +273,9 @@ export async function listAllAuditEntriesByUser(filter?: AuditFilter) {
 
   for (const [userId, entries] of Object.entries(store.auditByUser)) {
     const filtered = applyFilter(
-      [...entries].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+      [...entries].sort((a, b) =>
+        a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+      ),
       filter,
     );
     if (filtered.length > 0) {

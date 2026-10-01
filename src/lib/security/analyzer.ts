@@ -6,6 +6,26 @@ import type {
 } from "@/lib/types/domain";
 import { fetchBlocklist } from "@/lib/security/blocklist";
 
+/** Configuration for analyzer timeout behavior. */
+export interface AnalyzerConfig {
+  blocklistTimeoutMs: number;
+}
+
+/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
+export const defaultAnalyzerConfig: AnalyzerConfig = {
+  blocklistTimeoutMs: 5000,
+};
+
+/** Get analyzer config from environment or use defaults. */
+function getAnalyzerConfig(): AnalyzerConfig {
+  return {
+    blocklistTimeoutMs: parseInt(
+      process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS || "5000",
+      10,
+    ),
+  };
+}
+
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
   /send\s+funds\s+to/i,
@@ -161,42 +181,27 @@ async function fetchBlocklistWithTimeout(): Promise<{
 }> {
   const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
+    // fetchBlocklist applies its own configured timeout and rethrows on
+    // failure, so surface the outcome to the caller rather than throwing.
     const blocklist = await fetchBlocklist();
-    const health = getBlocklistHealth();
-    if (health.lastError) {
-      return {
-        blocklist,
-        status: {
-          blocked: true,
-          timedOut: /abort|timeout/i.test(health.lastError),
-          error: health.lastError,
-        },
-      };
-    }
+    return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
-    const aborted = err instanceof Error && err.name === "AbortError";
-
-    // fetchBlocklist swallows errors internally, so check health for failures
-    const health = getBlocklistHealth();
-    if (health.configured && health.lastError) {
-      const timedOut = aborted || /abort|timeout/i.test(health.lastError);
-      return {
-        blocklist: [],
-        status: {
-          blocked: true,
-          timedOut,
-          error: health.lastError,
-        },
-      };
-    }
-
-    return { blocklist: [], status: { blocked: false, timedOut: false } };
+    const isTimeout = err instanceof Error && err.name === "AbortError";
+    return {
+      blocklist: [],
+      status: {
+        blocked: true,
+        timedOut: isTimeout,
+        error: err instanceof Error ? err.message : "Unknown error",
+      },
+    };
   }
 }
 
 export async function evaluateSecurity(
   action: AgentAction,
 ): Promise<SecurityEvaluation> {
+  const config = getAnalyzerConfig();
   const analyzerStatus: AnalyzerStatus = {
     blocklistStatus: "success",
     isDegraded: false,
@@ -220,7 +225,9 @@ export async function evaluateSecurity(
     analyzerStatus.blocklistError =
       blocklistFetchStatus.error ?? "Blocklist fetch timed out";
     analyzerStatus.isDegraded = true;
-    analyzerStatus.degradationReasons?.push("blocklist_timeout");
+    analyzerStatus.degradationReasons?.push(
+      `blocklist_timeout_${config.blocklistTimeoutMs}ms`,
+    );
   } else if (blocklistFetchStatus.blocked) {
     analyzerStatus.blocklistStatus = "error";
     analyzerStatus.blocklistError = blocklistFetchStatus.error;
