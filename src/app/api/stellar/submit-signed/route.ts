@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { TransactionBuilder } from "@stellar/stellar-sdk";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
@@ -299,6 +300,17 @@ export async function POST(request: NextRequest) {
     const userId = auth.session.userId;
 
     const bodyResult = await readJsonBody(request);
+    if (bodyResult.ok && isLoginAuthorizationPayload(bodyResult.data)) {
+      logWarn("Submit signed rejected login payload", { ...context, userId, code: "login_payload" });
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 400,
+        body: { error: "Login signatures cannot authorize a payment." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     if (!bodyResult.ok) {
       logWarn("Submit signed payload too large", { ...context, userId });
       return jsonWithRequestContext(request, {
