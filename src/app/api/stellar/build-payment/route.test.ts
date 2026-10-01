@@ -38,11 +38,26 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
+vi.mock("@/lib/decision/engine", () => ({
+  evaluateDecision: vi.fn(async () => ({
+    decision: "APPROVE",
+    explanation: "Fixture decision",
+    triggeredPolicies: [],
+    riskScore: 0,
+    riskFindings: [],
+    requiresManualApproval: false,
+    analyzerStatus: { isDegraded: false },
+  })),
+}));
+
 import { Account } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as decisionPost } from "@/app/api/decision/route";
 import { POST as buildPaymentPost } from "@/app/api/stellar/build-payment/route";
+import { buildPaymentQuoteFromDecision } from "@/lib/stellar/verify-payment-quote";
+import { getFortexaStorePath } from "@/lib/storage/paths";
+import { decisionAmountStroops } from "@/lib/decision/engine";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { defaultPolicyConfig } from "@/lib/policy/engine";
 import { resetAuditState } from "@/lib/storage/audit-store";
@@ -67,12 +82,23 @@ function operatorCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
-function jsonRequest(url: string, body: unknown) {
+function signerCookie() {
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: OPERATOR_USER_ID,
+    expiresInSeconds: 300,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
+function jsonRequest(url: string, body: unknown, cookie = signerCookie()) {
   return new NextRequest(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie: operatorCookie(),
+      cookie,
     },
     body: JSON.stringify(body),
   });
@@ -91,6 +117,48 @@ function authorizedBuildBody(overrides: Record<string, unknown> = {}) {
 }
 
 let lastAuditEntryId = "";
+
+async function seedAuthorizedPayment(amountXLM = 18) {
+  const amountStroops = decisionAmountStroops(amountXLM);
+  const quote = {
+    ...buildPaymentQuoteFromDecision({
+      destination: destinationKeypair.publicKey(),
+      amountXLM,
+      memo: authorizedMemo,
+      actionId: "act-safe-1",
+      network: "testnet",
+    }),
+    ...(amountStroops ? { amountStroops } : {}),
+  };
+  const entryId = "00000000-0000-4000-8000-000000000249";
+  const store = {
+    auditByUser: {
+      [OPERATOR_USER_ID]: [
+        {
+          id: entryId,
+          timestamp: new Date().toISOString(),
+          action: {
+            id: "act-safe-1",
+            name: "Pay verified research API",
+            kind: "api_payment",
+            target: "research-pro:query/alpha",
+            domain: "api.safe-research.ai",
+            amountXLM,
+            tool: "research-pro",
+          },
+          decision: "APPROVE",
+          explanation: "Allowed at the policy cap.",
+          triggeredPolicies: [],
+          riskFindings: [],
+          paymentQuote: quote,
+        },
+      ],
+    },
+    usageByUser: {},
+  };
+  await fs.writeFile(getFortexaStorePath("audit.json"), JSON.stringify(store), "utf8");
+  lastAuditEntryId = entryId;
+}
 
 async function authorizePaymentDecision() {
   const decisionRes = await decisionPost(
@@ -150,6 +218,16 @@ beforeEach(async () => {
 });
 
 describe("POST /api/stellar/build-payment quote verification", () => {
+  it("rejects operator-only wallets", async () => {
+    const response = await buildPaymentPost(jsonRequest(
+      "http://localhost/api/stellar/build-payment",
+      authorizedBuildBody(),
+      operatorCookie(),
+    ));
+
+    expect(response.status).toBe(403);
+  });
+
   it.each(["0", "-1", "NaN", "Infinity", "9007199254740992", "10.12345678"] as const)(
     "rejects invalid amount %s before XDR construction",
     async (amount) => {
@@ -285,6 +363,101 @@ describe("POST /api/stellar/build-payment quote verification", () => {
     expect(buildRes.status).toBe(400);
     const payload = (await buildRes.json()) as { error: string };
     expect(payload.error).toBe("Invalid payment build request.");
+  });
+
+  it("builds a payment equal to the allowing cap", async () => {
+    const { policy } = await getPolicyConfig();
+    await updatePolicyConfig(
+      { ...policy, perTxCapXLM: 18, dailyCapXLM: 300 },
+      "stroop-cap-equal",
+    );
+
+    try {
+      await seedAuthorizedPayment(18);
+      horizonMocks.loadAccount.mockClear();
+      horizonMocks.fetchBaseFee.mockClear();
+
+      const buildRes = await buildPaymentPost(
+        jsonRequest(
+          "http://localhost/api/stellar/build-payment",
+          authorizedBuildBody({ auditEntryId: lastAuditEntryId }),
+        ),
+      );
+
+      expect(buildRes.status).toBe(200);
+      const payload = (await buildRes.json()) as { ok: boolean; xdr: string; paymentQuote?: { amountStroops?: string } };
+      expect(payload.ok).toBe(true);
+      expect(payload.xdr.length).toBeGreaterThan(20);
+      expect(payload.paymentQuote?.amountStroops).toBe("180000000");
+    } finally {
+      const current = await getPolicyConfig();
+      await updatePolicyConfig(
+        {
+          ...current.policy,
+          perTxCapXLM: policy.perTxCapXLM,
+          dailyCapXLM: policy.dailyCapXLM,
+        },
+        "stroop-cap-restore",
+      );
+    }
+  });
+
+  it("denies a payment one stroop over the cap and does not build", async () => {
+    const { policy } = await getPolicyConfig();
+    await updatePolicyConfig(
+      { ...policy, perTxCapXLM: 17.9999999, dailyCapXLM: 300 },
+      "stroop-cap-lower",
+    );
+
+    try {
+      await seedAuthorizedPayment(18);
+      horizonMocks.loadAccount.mockClear();
+      horizonMocks.fetchBaseFee.mockClear();
+
+      const buildRes = await buildPaymentPost(
+        jsonRequest(
+          "http://localhost/api/stellar/build-payment",
+          authorizedBuildBody({ auditEntryId: lastAuditEntryId }),
+        ),
+      );
+
+      expect(buildRes.status).toBe(403);
+      const payload = (await buildRes.json()) as { error: string };
+      expect(payload.error).toContain("cap");
+      expect(horizonMocks.loadAccount).not.toHaveBeenCalled();
+      expect(horizonMocks.fetchBaseFee).not.toHaveBeenCalled();
+    } finally {
+      const current = await getPolicyConfig();
+      await updatePolicyConfig(
+        {
+          ...current.policy,
+          perTxCapXLM: policy.perTxCapXLM,
+          dailyCapXLM: policy.dailyCapXLM,
+        },
+        "stroop-cap-restore",
+      );
+    }
+  });
+
+  it("rejects an extra fractional digit before building", async () => {
+    horizonMocks.loadAccount.mockClear();
+
+    const buildRes = await buildPaymentPost(
+      jsonRequest(
+        "http://localhost/api/stellar/build-payment",
+        authorizedBuildBody({
+          auditEntryId: "00000000-0000-4000-8000-000000000000",
+          amountXLM: "18.00000001",
+        }),
+      ),
+    );
+
+    expect(buildRes.status).toBe(400);
+    const payload = (await buildRes.json()) as {
+      details?: { fieldErrors?: { amountXLM?: string[] } };
+    };
+    expect(payload.details?.fieldErrors?.amountXLM?.length).toBeGreaterThan(0);
+    expect(horizonMocks.loadAccount).not.toHaveBeenCalled();
   });
 });
 

@@ -8,8 +8,15 @@ function normalizeEnvValue(value: string | undefined) {
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Next 16 declares `NODE_ENV` as a required property of `NodeJS.ProcessEnv`,
+ * which would block callers from passing a partial env (readiness checks build
+ * one to simulate a production configuration).
+ */
+export type StellarEnv = Readonly<Record<string, string | undefined>>;
+
 export function getStellarNetworkPassphrase(
-  env: NodeJS.ProcessEnv = process.env
+  env: StellarEnv = process.env
 ) {
   return (
     normalizeEnvValue(env.STELLAR_NETWORK_PASSPHRASE) ??
@@ -18,7 +25,7 @@ export function getStellarNetworkPassphrase(
 }
 
 export function getStellarHorizonUrl(
-  env: NodeJS.ProcessEnv = process.env
+  env: StellarEnv = process.env
 ) {
   return (
     normalizeEnvValue(env.STELLAR_HORIZON_URL) ??

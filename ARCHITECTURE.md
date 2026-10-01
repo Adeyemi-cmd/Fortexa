@@ -105,7 +105,9 @@ flowchart TB
 - `src/app/api/stellar/build-payment/route.ts`: builds unsigned TESTNET payment XDR.
 - `src/app/api/stellar/submit-signed/route.ts`: submits signed XDR, returns tx hash + explorer link.
 - `src/lib/stellar/client.ts`: Horizon calls, XDR construction, XDR submission.
-- `src/lib/storage/*-store.ts`: policy/audit/user-wallet persistence with DB fallback.
+- `src/lib/storage/*-store.ts`: policy/audit/user-wallet/submit-idempotency persistence with DB fallback.
+- `src/lib/storage/submit-idempotency-store.ts`: claims an idempotency key before submit, stores the accepted status + transaction id for replay, and rejects a reused key with a different canonical payment body.
+- `src/lib/storage/atomic-write.ts`: atomic JSON store writes (unique staging file + rename).
 - `src/lib/storage/db.ts`: optional Postgres connector + migration bootstrap + graceful fallback.
 - `src/app/api/metrics/route.ts` + `src/lib/observability/metrics.ts`: JSON and Prometheus metrics.
 
@@ -182,6 +184,17 @@ Operators can dry-run an unsaved policy draft before committing it, so the impac
 5. Nothing is written: the policy is not saved and usage is not consumed. Saving still happens only via `/api/policy`.
 
 The audit sample is intentionally small and deterministic (newest-first, capped) to keep simulations cheap and reviewable.
+
+### 5.2b Candidate Decision Impact (History Read)
+
+Operators can see which currently allowed payments a candidate policy version would turn into a denial — and which rule is responsible — before that version is activated.
+
+1. `GET /api/policy/history?candidate=<version>` loads the active policy and the candidate version from `policy-store` (read-only).
+2. `openAllowDecisions` collects the open allow decisions from the audit history (the newest recorded result per action, when that result is `APPROVE`/`WARN`).
+3. `diffDecisionImpact` (`src/lib/validation/diff.ts`) diffs the candidate against the active policy by rule id, re-runs each open allow through the decision engine under both policies, and walks the changed rules one at a time to attribute the flip to a single rule id.
+4. The response reports `flippedIds`, the responsible `ruleId` per flip, and a `status` of `decision change` or `no decision change`.
+
+Nothing is written: the candidate is never activated and usage is never consumed. Saving still happens only via `POST /api/policy` (or `POST /api/policy/rollback`).
 
 ### 5.3 Signed Payment Submission
 
@@ -338,6 +351,7 @@ Stored policy JSON (current state + history) can outlive the active schema. To p
 ### 7.2 Controls present in code
 
 - Per-route rate limiting (`src/lib/security/rate-limit.ts`)
+- Shared enforcement gate for money-movement routes (`src/lib/security/enforcement-gate.ts`): `/api/decision`, `/api/stellar/build-payment`, and `/api/stellar/submit-signed` consume the caller's rate budget atomically (Redis EVAL script or file read-modify-write via shared state) and check the destination — and, on decision, the action domain — against the threat-intel blocklist **before** policy evaluation, XDR construction, or Horizon submission. A destination blocked on one route is blocked on all three. Denials carry stable machine-readable codes: `BLOCKLISTED` (403) and `RATE_LIMITED` (429). Destination/action-domain values never enter metrics labels.
 - Login lockout on repeated failures (`src/lib/auth/login-lockout.ts`)
 - Optional shared file-backed state (`FORTEXA_SHARED_STATE_PATH`) for cross-process limiter/lockout state
 - Role gating (`requireAuth`) for sensitive APIs
@@ -375,7 +389,7 @@ stateDiagram-v2
 - `/api/health` for health checks
 - `/api/metrics` for JSON snapshot
 - `/api/metrics?format=prometheus` for scrape-compatible format
-- Ops UI consumes these APIs for dashboarding
+- Ops UI renders the same in-process snapshot: `src/app/settings/page.tsx` (Ops tab, also reached via `/ops`) reads `getMetricsSnapshot()` on the server and hands it to `src/components/ops-dashboard.tsx`, so screen and scrape cannot disagree
 
 ## 9) 🚨 Failure Modes and Current Behavior
 

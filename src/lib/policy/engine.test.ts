@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DuplicateRuleError, evaluatePolicy, defaultPolicyConfig, validateNoDuplicateRules } from "@/lib/policy/engine";
+import { DuplicateRuleError, evaluatePolicy, defaultPolicyConfig, readAmountStroops, validateNoDuplicateRules } from "@/lib/policy/engine";
 import type { AgentAction, DailyUsage, PolicyConfig } from "@/lib/types/domain";
 
 const baseAction: AgentAction = {
@@ -226,6 +226,27 @@ describe("policy engine", () => {
         triggerCodes(
           { amountXLM: 3.3000001 },
           { perTxCapXLM: 3.3, dailyCapXLM: 1000 },
+          { spentXLM: 0 },
+        ),
+      ).toContain("PER_TX_CAP_EXCEEDED");
+    });
+
+    it("compares a stored cap integer with the payment stroops", () => {
+      const cap = readAmountStroops(1);
+      expect(cap).toBe(10_000_000n);
+
+      expect(
+        triggerCodes(
+          { amountXLM: 1 },
+          { perTxCapXLM: 1, perTxCapStroops: cap?.toString(), dailyCapXLM: 10 },
+          { spentXLM: 0 },
+        ),
+      ).not.toContain("PER_TX_CAP_EXCEEDED");
+
+      expect(
+        triggerCodes(
+          { amountXLM: 1.0000001 },
+          { perTxCapXLM: 1, perTxCapStroops: cap?.toString(), dailyCapXLM: 10 },
           { spentXLM: 0 },
         ),
       ).toContain("PER_TX_CAP_EXCEEDED");

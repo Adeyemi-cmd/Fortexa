@@ -11,6 +11,8 @@ type AuditStoreFile = {
   usageByUser: Record<string, DailyUsage>;
 };
 
+export const AUDIT_EXPORT_MAX_ROWS = 10000;
+
 export type AuditFilter = {
   from?: string;
   to?: string;
@@ -27,6 +29,8 @@ const VALID_DECISIONS: DecisionType[] = [
 ];
 const VALID_DECISION_SET = new Set<string>(VALID_DECISIONS);
 
+const REDACTED = "[REDACTED]";
+
 export function validateAuditFilter(filter: AuditFilter): string | null {
   if (filter.from !== undefined && isNaN(Date.parse(filter.from))) {
     return "Invalid 'from' date. Use ISO 8601 format (e.g. 2025-01-01T00:00:00Z).";
@@ -41,6 +45,70 @@ export function validateAuditFilter(filter: AuditFilter): string | null {
     return `Invalid decision '${filter.decision}'. Must be one of: ${VALID_DECISIONS.join(", ")}.`;
   }
   return null;
+}
+
+const CREDENTIAL_KEY_PATTERN =
+  /(secret|token|password|passwd|api[_-]?key|apikey|authorization|auth|credential|private[_-]?key|access[_-]?key|bearer|cookie|session)/i;
+
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (CREDENTIAL_KEY_PATTERN.test(key)) {
+        result[key] = REDACTED;
+      } else {
+        result[key] = redactValue(nested);
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+export function redactAuditEntry(entry: AuditEntry): AuditEntry {
+  return redactValue(entry) as AuditEntry;
+}
+
+export type AuditExportResult =
+  | { ok: true; entries: AuditEntry[] }
+  | { ok: false; error: string; code: "CHAIN_INVALID" | "ROW_CAP_EXCEEDED" };
+
+export async function exportVerifiedAuditEntries(
+  userId: string,
+  filter?: AuditFilter,
+): Promise<AuditExportResult> {
+  const entries = await listAuditEntries(userId, filter);
+  return verifyAndRedactExport(entries);
+}
+
+export function verifyAndRedactExport(
+  entries: AuditEntry[],
+): AuditExportResult {
+  if (entries.length > AUDIT_EXPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      code: "ROW_CAP_EXCEEDED",
+      error: `Audit export exceeds maximum of ${AUDIT_EXPORT_MAX_ROWS} rows.`,
+    };
+  }
+
+  const ordered = [...entries].sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
+
+  const verification = verifyHashChain(ordered);
+  if (!verification.valid) {
+    return {
+      ok: false,
+      code: "CHAIN_INVALID",
+      error: verification.error ?? "Audit hash chain failed verification.",
+    };
+  }
+
+  return { ok: true, entries: ordered.map((entry) => redactAuditEntry(entry)) };
 }
 
 function applyFilter(
@@ -84,8 +152,15 @@ const baselineUsage: DailyUsage = {
   lastUpdated: new Date().toISOString(),
 };
 
-async function ensureStore() {
+/**
+ * Opens the audit file store, creating it if missing, and returns its path.
+ * The path comes only from resolveContainedStorePath, so a name that escapes
+ * the data directory (`..`, an absolute path, or a symlink pointing outside)
+ * throws StoragePathError before anything is read or written.
+ */
+export async function openAuditFileStore(fileName: string = AUDIT_STORE_FILE_NAME): Promise<ContainedStorePath> {
   await fs.mkdir(getFortexaStoreDir(), { recursive: true });
+  const storePath = await resolveContainedStorePath(fileName);
   try {
     await fs.access(storePath);
   } catch {
@@ -95,10 +170,11 @@ async function ensureStore() {
     };
     await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
   }
+  return storePath;
 }
 
 async function readStore(): Promise<AuditStoreFile> {
-  await ensureStore();
+  const storePath = await openAuditFileStore();
   const raw = await fs.readFile(storePath, "utf8");
   return JSON.parse(raw) as AuditStoreFile;
 }
@@ -150,7 +226,9 @@ export async function listAuditEntries(userId: string, filter?: AuditFilter) {
   const store = await readStore();
   const entries = store.auditByUser[userId] ?? [];
   return applyFilter(
-    [...entries].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+    [...entries].sort((a, b) =>
+      a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+    ),
     filter,
   );
 }
@@ -191,7 +269,9 @@ export async function listAllAuditEntriesByUser(filter?: AuditFilter) {
 
   for (const [userId, entries] of Object.entries(store.auditByUser)) {
     const filtered = applyFilter(
-      [...entries].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1)),
+      [...entries].sort((a, b) =>
+        a.timestamp < b.timestamp ? 1 : a.timestamp > b.timestamp ? -1 : 0,
+      ),
       filter,
     );
     if (filtered.length > 0) {

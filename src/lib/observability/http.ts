@@ -68,11 +68,15 @@ export function jsonWithRequestContext(
     durationMs,
   });
 
-  return NextResponse.json(input.body, {
+  const response = NextResponse.json(input.body, {
     status: input.status,
     headers: {
       "x-request-id": requestId,
       ...input.headers,
     },
   });
+
+  // Every route that uses this helper (auth, decision, payment) gets the shared
+  // security header set on success and error responses alike.
+  return applySecurityHeaders(response, requestId, { noStore: input.noStore });
 }

@@ -19,12 +19,23 @@ export interface PolicyConfig {
   blockedTools: string[];
   perTxCapXLM: number;
   dailyCapXLM: number;
+  /** Exact per-transaction cap in stroops, derived from perTxCapXLM. */
+  perTxCapStroops?: string;
+  /** Exact daily cap in stroops, derived from dailyCapXLM. */
+  dailyCapStroops?: string;
   maxToolCallsPerDay: number;
   riskThreshold: number;
   allowedHours?: {
     start: number;
     end: number;
   };
+  /**
+   * Stellar destinations (G... addresses, compared case-insensitively after
+   * trim + uppercase) that require a non-empty memo. A payment to one of
+   * these destinations without a memo is blocked with MEMO_REQUIRED_MISSING.
+   * Evaluated by the shared decision engine so simulate and live decide agree.
+   */
+  memoRequiredDestinations?: string[];
 }
 
 export interface DailyUsage {
@@ -111,6 +122,8 @@ export type StellarAssetId = "native";
 export interface PaymentQuote {
   destination: string;
   amountXLM: string;
+  /** Exact payment amount in stroops, derived from amountXLM. */
+  amountStroops?: string;
   asset: StellarAssetId;
   memo: string;
   network: StellarNetworkId;

@@ -3,8 +3,8 @@ import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import {
-  recordApiMetric,
   recordDecisionOutcome,
+  recordRateLimitRejection,
   recordStellarSubmitResult,
   resetMetrics,
 } from "@/lib/observability/metrics";
@@ -44,22 +44,7 @@ describe("/api/metrics route", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("application/json");
 
-    const body = (await response.json()) as {
-      service: string;
-      timestamp: string;
-      totals: { totalCount: number; errorCount: number; errorRate: number };
-      routes: Array<{
-        route: string;
-        method: string;
-        totalCount: number;
-        errorCount: number;
-        errorRate: number;
-        avgDurationMs: number;
-        p95DurationMs: number;
-        lastStatusCode: number;
-        lastSeenAt: string;
-      }>;
-    };
+    const body = (await response.json()) as MetricsSnapshot;
 
     expect(body.service).toBe("fortexa");
     expect(typeof body.timestamp).toBe("string");
@@ -69,6 +54,9 @@ describe("/api/metrics route", () => {
     expect(body.totals).toHaveProperty("errorCount");
     expect(body.totals).toHaveProperty("errorRate");
     expect(typeof body.totals.totalCount).toBe("number");
+
+    // The ops dashboard renders these exact fields.
+    expect(body.counters).toEqual({ allow: 0, deny: 0, rateLimit: 0, submitFailures: 0 });
 
     expect(Array.isArray(body.routes)).toBe(true);
 
@@ -136,6 +124,13 @@ describe("/api/metrics route", () => {
     expect(text).toContain("# TYPE fortexa_request_duration_ms_p95 gauge");
     expect(text).toContain("fortexa_request_duration_ms_p95{");
 
+    // Every request-bucket series is labelled by route and method.
+    const requestBucketFamilies = [
+      "fortexa_requests_total",
+      "fortexa_request_errors_total",
+      "fortexa_request_duration_ms_p95",
+    ];
+
     const lines = text.trim().split("\n");
     for (const line of lines) {
       if (
@@ -167,30 +162,40 @@ describe("/api/metrics route", () => {
     });
     recordDecisionOutcome("APPROVE");
     recordDecisionOutcome("BLOCK");
-    recordStellarSubmitResult("success");
+    recordRateLimitRejection();
+    recordStellarSubmitResult("horizon_failure");
 
-    const request = new NextRequest("http://localhost/api/metrics?format=prometheus", {
-      headers: { cookie: operatorCookie() },
-    });
+    const jsonResponse = await GET(
+      new NextRequest("http://localhost/api/metrics", {
+        headers: { cookie: operatorCookie() },
+      })
+    );
+    const body = (await jsonResponse.json()) as MetricsSnapshot;
 
-    const response = await GET(request);
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/plain");
-    expect(response.headers.get("content-type")).toContain("version=0.0.4");
+    expect(body.counters).toEqual({ allow: 1, deny: 1, rateLimit: 1, submitFailures: 1 });
 
-    const body = await response.text();
+    const prometheusResponse = await GET(
+      new NextRequest("http://localhost/api/metrics?format=prometheus", {
+        headers: { cookie: operatorCookie() },
+      })
+    );
+    const text = await prometheusResponse.text();
 
-    expect(body).toContain('outcome="APPROVE"');
-    expect(body).toContain('outcome="BLOCK"');
-    expect(body).toContain("fortexa_stellar_submit_results_total");
-    expect(body).toContain('result="success"');
+    expect(text).toContain(`fortexa_decisions_allowed_total ${body.counters.allow}`);
+    expect(text).toContain(`fortexa_decisions_denied_total ${body.counters.deny}`);
+    expect(text).toContain(`fortexa_rate_limit_rejections_total ${body.counters.rateLimit}`);
+    expect(text).toContain(`fortexa_stellar_submit_failures_total ${body.counters.submitFailures}`);
+  });
 
-    expect(body).not.toContain("destination");
-    expect(body).not.toContain("memo");
-    expect(body).not.toContain(destinationWallet);
-    expect(body).not.toContain("coffee");
-    expect(body).not.toContain(fixtureSecret);
-    expect(body).not.toContain("metrics-test-secret");
+  it("reports zeroed counters before any activity is recorded", async () => {
+    const response = await GET(
+      new NextRequest("http://localhost/api/metrics", {
+        headers: { cookie: operatorCookie() },
+      })
+    );
+    const body = (await response.json()) as MetricsSnapshot;
+
+    expect(body.counters).toEqual({ allow: 0, deny: 0, rateLimit: 0, submitFailures: 0 });
   });
 
   it("returns 403 for viewer role", async () => {

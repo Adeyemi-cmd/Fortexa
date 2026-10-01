@@ -1,16 +1,17 @@
-import {
-  Account,
-  Asset,
-  Keypair,
-  Memo,
-  Networks,
-  Operation,
-  TransactionBuilder,
-} from "@stellar/stellar-sdk";
-import { NextRequest, NextResponse } from "next/server";
+declare global {
+  var MOCK_SESSION_PUBLIC_KEY: string | undefined;
+}
+
+import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "./route";
+
+const { getAuditEntryMock, verifyQuoteMock } = vi.hoisted(() => ({
+  getAuditEntryMock: vi.fn(),
+  verifyQuoteMock: vi.fn(),
+}));
 
 vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(),
@@ -63,6 +64,16 @@ vi.mock("@/lib/storage/user-wallet-store", () => ({
   getUserWallet: vi.fn(),
 }));
 
+vi.mock("@/lib/storage/audit-store", () => ({ getAuditEntryById: vi.fn(async () => ({ id: "decision-1" })) }));
+vi.mock("@/lib/stellar/verify-payment-quote", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/verify-payment-quote")>(),
+  isPaymentDecisionCurrent: vi.fn(() => true),
+}));
+vi.mock("@/lib/stellar/payment-build-authorization", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/payment-build-authorization")>(),
+  verifyBuildAuthorization: vi.fn(() => true),
+}));
+
 vi.mock("@/lib/validation/schemas", () => ({
   stellarSubmitSignedRequestSchema: {
     safeParse: vi.fn(),
@@ -82,7 +93,7 @@ vi.mock("@/lib/stellar/network-config", () => ({
 }));
 
 vi.mock("@/lib/stellar/client", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("@/lib/stellar/client")>();
   return {
     ...actual,
     submitSignedTransactionXdr: vi.fn(async () => ({
@@ -150,28 +161,17 @@ function makeDecisionReceipt(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.mocked(requireAuth).mockReturnValue({
+  vi.mocked(requireAuth).mockImplementation(() => ({
     ok: true,
-    session: { userId: "user-1" },
-  } as ReturnType<typeof requireAuth>);
+    session: { userId: "user-1", publicKey: globalThis.MOCK_SESSION_PUBLIC_KEY || "GCDEFAULTTESTWALLET123" },
+  } as ReturnType<typeof requireAuth>));
 });
 
 describe("POST /api/stellar/submit-signed - source wallet verification", () => {
   it("accepts a submission whose XDR source matches the session wallet and the decision receipt", async () => {
     const walletKp = Keypair.random();
-    const destination = Keypair.random().publicKey();
-    const signedXdr = buildSignedXdr(
-      walletKp,
-      walletKp.publicKey(),
-      destination,
-      "1",
-      "approved-memo",
-    );
-    const decisionReceipt = makeDecisionReceipt(
-      destination,
-      "1",
-      "approved-memo",
-    );
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
+    const signedXdr = buildSignedXdr(walletKp, walletKp.publicKey());
 
     vi.mocked(getUserWallet).mockResolvedValue({
       userId: "user-1",
@@ -192,6 +192,7 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
     const response = await POST(buildRequest({ signedXdr, decisionReceipt }));
     const body = await response.json();
 
+    expect(requireAuth).toHaveBeenCalledWith(expect.any(NextRequest), { allowedRoles: ["signer"] });
     expect(response.status).toBe(200);
     expect(body.ok).toBe(true);
   });
@@ -274,12 +275,44 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
     const response = await POST(buildRequest({ signedXdr, decisionReceipt }));
     const body = await response.json();
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
     expect(body.error).toMatch(/does not match/i);
+  });
+
+  it("rejects a signed payment when its decision does not allow execution", async () => {
+    const walletKp = Keypair.random();
+    const signedXdr = buildSignedXdr(walletKp, walletKp.publicKey());
+    vi.mocked(getUserWallet).mockResolvedValue({
+      userId: "user-1",
+      publicKey: walletKp.publicKey(),
+      source: "external",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    vi.mocked(readJsonBody).mockResolvedValue({
+      ok: true,
+      data: { signedXdr, auditEntryId: "00000000-0000-4000-8000-000000000000" },
+    });
+    vi.mocked(stellarSubmitSignedRequestSchema.safeParse).mockReturnValue({
+      success: true,
+      data: { signedXdr, auditEntryId: "00000000-0000-4000-8000-000000000000" },
+    } as ReturnType<typeof stellarSubmitSignedRequestSchema.safeParse>);
+    verifyQuoteMock.mockReturnValueOnce({
+      ok: false,
+      status: 403,
+      error: "Decision does not authorize payment execution.",
+    });
+
+    const response = await POST(buildRequest({ signedXdr }));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({
+      error: "Decision does not authorize payment execution.",
+    });
   });
 
   it("rejects malformed XDR with a 400", async () => {
     const walletKp = Keypair.random();
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
 
     vi.mocked(getUserWallet).mockResolvedValue({
       userId: "user-1",

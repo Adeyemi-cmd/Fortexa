@@ -1,21 +1,24 @@
+import { readJsonBody } from "@/lib/http/read-json-body";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
-import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from "@/lib/auth/login-lockout";
-import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
-import { verifyWalletChallenge } from "@/lib/auth/wallet-challenge";
-import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet-role";
-import { jsonWithRequestContext } from "@/lib/observability/http";
-import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
-import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from @"lib/auth/login-lockout";
+import { AUTH_COOKIE_KEY, createSessionToken } from @/lib/auth/session";
+import { verifyWalletChallenge } from @"lib/auth/wallet-challenge";
+import { normalizeWalletPublicKey, resolveRoleByWallet } from @"lib/auth/wallet-role";
+import { jsonWithRequestContext } from @"lib/observability/http";
+import { getRequestLogContext, logError, logInfo, logWarn } from @"lib/observability/logger";
+import { consumeRateLimit, rateLimitHeaders } from @/lib/security/rate-limit";
+import { upsertUserWallet } from @"lib/storage/user-wallet-store";
+import { logValidationFailure, toPublicValidationDetails } from @/lib/validation/errors";
 
 const loginSchema = z.object({
   publicKey: z.string().regex(/^G[A-Z2-7]{55}$/u, "Invalid Stellar public key."),
-  challengeId: z.string().uuid("Challenge id is required."),
+  challengeId: z.string().uuid("Challenge id required."),
   signature: z.string().min(1, "Wallet signature is required."),
 });
+
+const LOCKED_ERROR = "Account login is temporarily locked due to failed attempts.";
 
 function challengeErrorMessage(code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature") {
   switch (code) {
@@ -30,6 +33,13 @@ function challengeErrorMessage(code: "missing" | "expired" | "replayed" | "walle
     default:
       return "Login challenge is invalid or expired.";
   }
+}
+
+function lockedResponse(retryAfterSeconds: number) {
+  return {
+    error: LOCKED_ERROR,
+    retryAfterSeconds: Math.max(1, retryAfterSeconds),
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -56,7 +66,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 429,
-      body: { error: "Too many login attempts. Try again later." },
+      body: { error: "Too many login attempts. Try again later.", code: "rate_limited" },
       headers: rateLimitHeaders(rate),
     });
   }
@@ -72,27 +82,29 @@ export async function POST(request: NextRequest) {
         route: "/api/auth/login",
         startedAtMs,
         status: 400,
-        body: { error: "Invalid login payload.", details: toPublicValidationDetails(parsed.error) },
+        body: {
+          error: "Invalid login payload.",
+          code: "invalid_payload",
+          details: toPublicValidationDetails(parsed.error),
+        },
         headers: rateLimitHeaders(rate),
       });
     }
 
     const normalizedWallet = normalizeWalletPublicKey(parsed.data.publicKey);
+    const userId = `wallet:${normalizedWallet}`;
 
-    const lockState = await isLoginLocked(normalizedWallet, clientIp);
+    const lockState = await isLoginLocked(userId, clientIp);
     if (lockState.locked) {
       logWarn("Auth login blocked by lockout", { ...context, wallet: normalizedWallet, ip: clientIp });
       return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: 423,
-        body: {
-          error: "Account login is temporarily locked due to failed attempts.",
-          retryAfterSeconds: lockState.retryAfterSeconds,
-        },
+        body: lockedResponse(lockState.retryAfterSeconds),
         headers: {
           ...rateLimitHeaders(rate),
-          "Retry-After": String(lockState.retryAfterSeconds),
+          "Retry-After": String(Math.max(1, lockState.retryAfterSeconds)),
         },
       });
     }
@@ -105,7 +117,7 @@ export async function POST(request: NextRequest) {
 
     if (!challengeResult.ok) {
       const countsAsFailure = challengeResult.code === "invalid_signature";
-      const failure = countsAsFailure ? await registerLoginFailure(normalizedWallet, clientIp) : null;
+      const failure = countsAsFailure ? await registerLoginFailure(userId, clientIp) : null;
 
       logWarn("Auth login challenge verification failed", {
         ...context,
@@ -117,37 +129,24 @@ export async function POST(request: NextRequest) {
         route: "/api/auth/login",
         startedAtMs,
         status: challengeResult.code === "invalid_signature" ? 401 : 400,
-        body: {
-          error: failure?.justLocked
-            ? `${challengeErrorMessage(challengeResult.code)} Login temporarily locked due to repeated failures.`
-            : challengeErrorMessage(challengeResult.code),
-          retryAfterSeconds: failure?.justLocked
-            ? Math.max(1, Math.ceil((failure.lockedUntilMs - Date.now()) / 1000))
-            : undefined,
-        },
+        body: { error: challengeErrorMessage(challengeResult.code) },
         headers: rateLimitHeaders(rate),
       });
     }
 
-    const role = resolveRoleByWallet(normalizedWallet);
+    const roles = resolveRolesByWallet(normalizedWallet);
 
     if (!role) {
-      const failure = await registerLoginFailure(normalizedWallet, clientIp);
+      const failure = await registerLoginFailure(userId, clientIp);
       logWarn("Auth login unknown wallet", { ...context, wallet: normalizedWallet });
       return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: 401,
-        body: {
-          error: failure.justLocked
-            ? "Wallet is not authorized. Login temporarily locked due to repeated failures."
-            : "Wallet is not authorized.",
-        },
+        body: { error: "Wallet is not authorized." },
         headers: rateLimitHeaders(rate),
       });
     }
-
-    const userId = `wallet:${normalizedWallet}`;
 
     await upsertUserWallet(userId, {
       publicKey: normalizedWallet,
@@ -155,10 +154,12 @@ export async function POST(request: NextRequest) {
       provider: "login",
     });
 
-    const token = createSessionToken({
+    const session = startSession({
       email: `wallet:${normalizedWallet}`,
-      role,
+      role: roles.includes("operator") ? "operator" : roles[0],
+      roles,
       userId,
+      publicKey: normalizedWallet,
     });
 
     const response = respond(request, {
@@ -167,26 +168,33 @@ export async function POST(request: NextRequest) {
       status: 200,
       body: {
         ok: true,
-        role,
+        role: roles.includes("operator") ? "operator" : roles[0],
+        roles,
         wallet: normalizedWallet,
       },
       headers: rateLimitHeaders(rate),
+      // The response sets a session cookie, so it must never be cached.
+      noStore: true,
     });
 
-    response.cookies.set(AUTH_COOKIE_KEY, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(response, session.token);
 
-    await clearLoginFailures(normalizedWallet, clientIp);
+    await clearLoginFailures(userId, clientIp);
 
     logInfo("Auth login success", { ...context, wallet: normalizedWallet, role });
 
     return response;
   } catch (error) {
+    if (error instanceof WalletAlreadyBoundError) {
+      return jsonWithRequestContext(request, {
+        route: "/api/auth/login",
+        startedAtMs,
+        status: 409,
+        body: { error: error.message },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     logError("Auth login internal error", {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",
@@ -195,7 +203,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 500,
-      body: { error: error instanceof Error ? error.message : "Login failed." },
+      body: { error: error instanceof Error ? error.message : "Login failed.", code: "internal_error" },
       headers: rateLimitHeaders(rate),
     });
   }

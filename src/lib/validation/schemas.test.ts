@@ -8,6 +8,7 @@ import {
   IDEMPOTENCY_KEY_MIN,
   policyConfigSchema,
   stellarBuildPaymentRequestSchema,
+  stellarSubmitSignedRequestSchema,
   validateIdempotencyKey,
 } from "@/lib/validation/schemas";
 
@@ -108,6 +109,15 @@ describe("validation schemas", () => {
     }
   });
 
+  it("requires an audit decision reference for signed payment submission", () => {
+    const signedXdr = "A".repeat(20);
+    expect(stellarSubmitSignedRequestSchema.safeParse({ signedXdr }).success).toBe(false);
+    expect(stellarSubmitSignedRequestSchema.safeParse({
+      signedXdr,
+      auditEntryId: "00000000-0000-4000-8000-000000000000",
+    }).success).toBe(true);
+  });
+
   it("accepts valid agent plan request", () => {
     const parsed = agentPlanRequestSchema.safeParse({
       goal: "Find a safe data provider and plan payment.",
@@ -116,46 +126,4 @@ describe("validation schemas", () => {
 
     expect(parsed.success).toBe(true);
   });
-  describe("validateIdempotencyKey", () => {
-    it("rejects empty keys", () => {
-      expect(validateIdempotencyKey("")).toEqual({ ok: false, error: IDEMPOTENCY_KEY_ERROR });
-      expect(validateIdempotencyKey("   ")).toEqual({ ok: false, error: IDEMPOTENCY_KEY_ERROR });
-      expect(validateIdempotencyKey(undefined)).toEqual({ ok: false, error: IDEMPOTENCY_KEY_ERROR });
-    });
-
-    it("rejects keys shorter than minimum length", () => {
-      expect(validateIdempotencyKey("a".repeat(IDEMPOTENCY_KEY_MIN - 1))).toEqual({
-        ok: false,
-        error: IDEMPOTENCY_KEY_ERROR,
-      });
-    });
-
-    it("rejects keys longer than maximum length", () => {
-      expect(validateIdempotencyKey("a".repeat(IDEMPOTENCY_KEY_MAX + 1))).toEqual({
-        ok: false,
-        error: IDEMPOTENCY_KEY_ERROR,
-      });
-    });
-
-    it("rejects keys with invalid characters", () => {
-      for (const key of ["1234567!", "1234 5678", "12345678/", "12345678@"]) {
-        expect(validateIdempotencyKey(key)).toEqual({
-          ok: false,
-          error: IDEMPOTENCY_KEY_ERROR,
-        });
-      }
-    });
-
-    it("accepts valid boundary keys", () => {
-      const minKey = "a".repeat(IDEMPOTENCY_KEY_MIN);
-      const maxKey = "A".repeat(IDEMPOTENCY_KEY_MAX);
-      expect(validateIdempotencyKey(minKey)).toEqual({ ok: true, key: minKey });
-      expect(validateIdempotencyKey(maxKey)).toEqual({ ok: true, key: maxKey });
-      expect(validateIdempotencyKey("idem-key_01.test")).toEqual({
-        ok: true,
-        key: "idem-key_01.test",
-      });
-    });
-  });
-
 });

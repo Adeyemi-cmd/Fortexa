@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
 
+import { parseStoredPolicy } from "@/lib/policy/migrations";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { generatePolicyDiff, groupDiffChanges } from "@/lib/validation/diff";
 import type { PolicyConfig } from "@/lib/types/domain";
+
+// Shared fixtures with the migration test suite so the API and the
+// import component cannot drift on what counts as a valid or rejected
+// document.
+import currentValid from "@/lib/policy/__fixtures__/policy-current-valid.json";
+import malformedWrongTypes from "@/lib/policy/__fixtures__/policy-malformed-types.json";
+import midMigrationFailure from "@/lib/policy/__fixtures__/policy-mid-migration-failure.json";
+import unknownVersion from "@/lib/policy/__fixtures__/policy-unknown-version.json";
 
 describe("Policy Import/Export", () => {
   const validPolicy: PolicyConfig = {
@@ -94,6 +103,38 @@ describe("Policy Import/Export", () => {
       const result = policyConfigSchema.safeParse(invalid);
       expect(result.success).toBe(false);
       expect(original).toEqual(validPolicy);
+    });
+
+    it("accepts the shared current-schema fixture via the migration chain", () => {
+      const result = parseStoredPolicy(currentValid);
+      expect(result.ok).toBe(true);
+    });
+
+    it("rejects the shared unknown-version fixture and reports the failing version", () => {
+      const result = parseStoredPolicy(unknownVersion);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("expected unknown version to be rejected");
+      }
+      expect(result.version).toBe(unknownVersion.schemaVersion);
+    });
+
+    it("rejects the shared mid-migration failure fixture without a partial version", () => {
+      const result = parseStoredPolicy(midMigrationFailure);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("expected mid-migration failure to be rejected");
+      }
+      expect(result.version).toBe(midMigrationFailure.schemaVersion);
+    });
+
+    it("rejects the shared malformed-types fixture with a structured error", () => {
+      const result = parseStoredPolicy(malformedWrongTypes);
+      expect(result.ok).toBe(false);
+      if (result.ok) {
+        throw new Error("expected malformed types to be rejected");
+      }
+      expect(result.issues.length).toBeGreaterThan(0);
     });
   });
 
