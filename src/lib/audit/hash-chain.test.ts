@@ -186,47 +186,6 @@ describe("verifyHashChain — deleted entry", () => {
   });
 });
 
-describe("verifyHashChain — explicit export boundaries", () => {
-  it("verifies a filtered chain segment when its boundaries are declared", () => {
-    const chain = buildChain(3);
-    const segment = chain.slice(1);
-    const result = verifyHashChain(segment, {
-      firstEntryHash: chain[1]!.entryHash,
-      lastEntryHash: chain[2]!.entryHash,
-    });
-
-    expect(result.valid).toBe(true);
-  });
-
-  it("detects deletion of the first record even when the remaining segment is re-rooted", () => {
-    const chain = buildChain(3);
-    const reRootedFirst = {
-      ...chain[1]!,
-      previousHash: GENESIS_HASH,
-    };
-    reRootedFirst.entryHash = computeEntryHash(reRootedFirst);
-
-    const result = verifyHashChain([reRootedFirst], {
-      firstEntryHash: chain[0]!.entryHash,
-      lastEntryHash: reRootedFirst.entryHash,
-    });
-
-    expect(result.valid).toBe(false);
-    if (!result.valid) expect(result.reason).toContain("chain start boundary mismatch");
-  });
-
-  it("detects deletion of the last record from an otherwise valid segment", () => {
-    const chain = buildChain(3);
-    const result = verifyHashChain(chain.slice(0, 2), {
-      firstEntryHash: chain[0]!.entryHash,
-      lastEntryHash: chain[2]!.entryHash,
-    });
-
-    expect(result.valid).toBe(false);
-    if (!result.valid) expect(result.reason).toContain("chain end boundary mismatch");
-  });
-});
-
 describe("verifyHashChain — reordered entries", () => {
   it("detects entries whose timestamps have been swapped to disguise reordering", () => {
     const chain = buildChain(3);

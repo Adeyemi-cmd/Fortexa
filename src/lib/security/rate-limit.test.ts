@@ -48,3 +48,43 @@ describe("rate limit shared state", () => {
     expect(secondResult.retryAfterSeconds).toBeGreaterThan(0);
   });
 });
+
+describe("rate limit metrics", () => {
+  // Both modules are imported dynamically so they resolve from the same module
+  // registry; the shared-state test above calls `vi.resetModules()`.
+  async function loadModules() {
+    const rateLimit = await import("@/lib/security/rate-limit");
+    const metrics = await import("@/lib/observability/metrics");
+    await rateLimit.resetRateLimitStore();
+    metrics.resetMetrics();
+    return { rateLimit, metrics };
+  }
+
+  it("counts rejections so the ops dashboard and the metrics scrape agree", async () => {
+    const { rateLimit, metrics } = await loadModules();
+    const config = { key: "metrics-test", limit: 2, windowMs: 60_000 };
+
+    const first = await rateLimit.consumeRateLimit(requestFromIp("10.0.0.9"), config);
+    const second = await rateLimit.consumeRateLimit(requestFromIp("10.0.0.9"), config);
+    const rejected = await rateLimit.consumeRateLimit(requestFromIp("10.0.0.9"), config);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(rejected.ok).toBe(false);
+
+    expect(metrics.getRateLimitRejectionCount()).toBe(1);
+    expect(metrics.getMetricsSnapshot().counters.rateLimit).toBe(1);
+  });
+
+  it("leaves the counter at zero while the bucket still has capacity", async () => {
+    const { rateLimit, metrics } = await loadModules();
+
+    await rateLimit.consumeRateLimit(requestFromIp("10.0.0.10"), {
+      key: "metrics-test-no-rejection",
+      limit: 5,
+      windowMs: 60_000,
+    });
+
+    expect(metrics.getRateLimitRejectionCount()).toBe(0);
+  });
+});

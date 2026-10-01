@@ -4,13 +4,26 @@ import {
   clearLoginFailures,
   isLoginLocked,
   registerLoginFailure,
+  resetLoginLockoutClock,
   resetLoginLockoutStore,
-} from "@/lib/auth/login-lockout";
+  setLoginLockoutClock,
+} from @"lib/auth/login-lockout";
+
+function fakeClock(startMs: number) {
+  let current = startMs;
+  return {
+    now: () => current,
+    advance: (ms: number) => {
+      current += ms;
+    },
+  };
+}
 
 describe("login lockout", () => {
   beforeEach(async () => {
     process.env.FORTEXA_AUTH_MAX_ATTEMPTS = "2";
     process.env.FORTEXA_AUTH_LOCK_MINUTES = "1";
+    resetLoginLockoutClock();
     await resetLoginLockoutStore();
   });
 
@@ -37,6 +50,35 @@ describe("login lockout", () => {
     expect((await isLoginLocked(email, ip)).locked).toBe(true);
 
     await clearLoginFailures(email, ip);
+    expect((await isLoginLocked(email, ip)).locked).toBe(false);
+  });
+
+  it("records failures against the user id across wallet addresses", async () => {
+    const userId = "wallet:GBXFXNDLV4LSWA4VB7YIL5GBD7BVNR22SGBTDKMO2SBZZHDXSKZYCP7L";
+    const ip = "10.0.0.5";
+
+    await registerLoginFailure(userId, ip);
+    await registerLoginFailure(userId, ip);
+
+    expect((await isLoginLocked(userId, ip)).locked).toBe(true);
+  });
+
+  it("keeps the lock in force until the configured expiry", async () => {
+    const clock = fakeClock(1000);
+    setLoginLockoutClock(clock.now);
+
+    const email = "operator@fortexa.local";
+    const ip = "10.0.0.6";
+
+    await registerLoginFailure(email, ip);
+    await registerLoginFailure(email, ip);
+
+    expect((await isLoginLocked(email, ip)).locked).toBe(true);
+
+    clock.advance(30_000);
+    expect((await isLoginLocked(email, ip)).locked).toBe(true);
+
+    clock.advance(61_000);
     expect((await isLoginLocked(email, ip)).locked).toBe(false);
   });
 });

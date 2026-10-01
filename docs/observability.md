@@ -11,10 +11,10 @@ Fortexa exposes lightweight, Prometheus-compatible metrics for every API route. 
 | Endpoint | Purpose | Auth |
 | --- | --- | --- |
 | `GET /api/health` | Liveness check | None |
-| `GET /api/metrics` | JSON snapshot of all route buckets | Operator session cookie |
+| `GET /api/metrics` | JSON snapshot of all route buckets plus the `counters` block | Operator session cookie |
 | `GET /api/metrics?format=prometheus` | Prometheus text exposition (v0.0.4) | Operator session cookie |
 
-The `/ops` page in the app renders the same data for human operators.
+The `/ops` page in the app renders the same snapshot for human operators.
 
 ### Auth
 
@@ -28,6 +28,8 @@ For local development (when `FORTEXA_OPERATOR_WALLETS` is unset), any valid-form
 
 All series are labeled by `route` (Next.js route path, e.g. `/api/decision`) and `method` (uppercase HTTP verb).
 
+Metric names and label keys are enforced by an allowlist at export time (`ALLOWED_METRIC_NAMES` / `ALLOWED_LABEL_KEYS` in [`src/lib/observability/metrics.ts`](../src/lib/observability/metrics.ts)): series carrying any other label (e.g. `destination`, `memo`) or an undocumented name are dropped, and help text is passed through `redactMetricText` before rendering.
+
 | Metric | Type | Description |
 | --- | --- | --- |
 | `fortexa_requests_total` | counter | Total API requests by route/method |
@@ -35,6 +37,15 @@ All series are labeled by `route` (Next.js route path, e.g. `/api/decision`) and
 | `fortexa_request_duration_ms_p95` | gauge | Rolling p95 latency in milliseconds (last 500 samples per bucket) |
 | `fortexa_decision_outcomes_total` | counter | Decision evaluations labelled by `outcome` (APPROVE \| WARN \| REQUIRE_APPROVAL \| BLOCK) |
 | `fortexa_stellar_submit_results_total` | counter | Stellar submission attempts labelled by `result` (success \| horizon_failure \| validation_failure \| idempotency_replay \| idempotency_conflict) |
+| `fortexa_decisions_allowed_total` | counter | Rolled up: decisions that let the action proceed (`APPROVE` + `WARN`) |
+| `fortexa_decisions_denied_total` | counter | Rolled up: decisions that stopped the action (`REQUIRE_APPROVAL` + `BLOCK`) |
+| `fortexa_rate_limit_rejections_total` | counter | Requests the rate limiter rejected with HTTP 429 |
+| `fortexa_stellar_submit_failures_total` | counter | Rolled up: submissions that did not settle on-chain (everything except `success` and `idempotency_replay`) |
+
+The four rolled-up counters are the same numbers the ops dashboard renders. They are
+derived from in-process counters only (never from a scan of the audit table) and are
+always emitted, zero-initialised, so alert rules never break on a freshly restarted
+process.
 
 Sample output:
 
@@ -49,9 +60,37 @@ fortexa_request_errors_total{route="/api/health",method="GET"} 0
 # HELP fortexa_request_duration_ms_p95 P95 request duration in milliseconds
 # TYPE fortexa_request_duration_ms_p95 gauge
 fortexa_request_duration_ms_p95{route="/api/health",method="GET"} 1.00
+# HELP fortexa_decisions_allowed_total Total decisions that were allowed to proceed
+# TYPE fortexa_decisions_allowed_total counter
+fortexa_decisions_allowed_total 2
+# HELP fortexa_decisions_denied_total Total decisions that stopped the action
+# TYPE fortexa_decisions_denied_total counter
+fortexa_decisions_denied_total 1
+# HELP fortexa_rate_limit_rejections_total Total requests rejected by the rate limiter
+# TYPE fortexa_rate_limit_rejections_total counter
+fortexa_rate_limit_rejections_total 0
+# HELP fortexa_stellar_submit_failures_total Total Stellar submissions that did not settle on-chain
+# TYPE fortexa_stellar_submit_failures_total counter
+fortexa_stellar_submit_failures_total 0
 ```
 
 > Note: `p95` is exported as a gauge computed from an in-memory ring buffer (last 500 observations per route), not as a Prometheus histogram. It is intended for at-a-glance dashboards, not high-fidelity SLO math.
+
+### JSON snapshot shape
+
+```jsonc
+{
+  "service": "fortexa",
+  "timestamp": "2026-09-30T08:00:00.000Z",
+  "totals": { "totalCount": 12, "errorCount": 1, "errorRate": 0.083 },
+  "counters": { "allow": 2, "deny": 1, "rateLimit": 0, "submitFailures": 0 },
+  "routes": [ /* route/method buckets */ ]
+}
+```
+
+`counters` is what the in-app dashboard renders, byte for byte: the server component
+that loads the Ops tab calls `getMetricsSnapshot()` and passes the result to
+`src/components/ops-dashboard.tsx`, so the screen and this body cannot drift.
 
 ---
 
@@ -166,6 +205,37 @@ sum(rate(fortexa_stellar_submit_results_total[5m]))
 sum by (result) (rate(fortexa_stellar_submit_results_total[5m]))
 ```
 
+### Decision throughput: allowed vs denied (5-minute window)
+
+```promql
+rate(fortexa_decisions_allowed_total[5m])
+  +
+rate(fortexa_decisions_denied_total[5m])
+```
+
+### Share of decisions that were denied
+
+```promql
+rate(fortexa_decisions_denied_total[5m])
+  /
+clamp_min(
+  rate(fortexa_decisions_allowed_total[5m]) + rate(fortexa_decisions_denied_total[5m]),
+  1e-9
+)
+```
+
+### Rate-limit rejections per second
+
+```promql
+rate(fortexa_rate_limit_rejections_total[5m])
+```
+
+### Signed submission failures per second
+
+```promql
+rate(fortexa_stellar_submit_failures_total[5m])
+```
+
 ### Example alert — sustained elevated error rate
 
 ```yaml
@@ -211,11 +281,32 @@ Panels:
 
 For operators who don't want to wire up Prometheus, the `/ops` page renders the same snapshot:
 
+- Allowed / denied / rate-limited / submit-failure counters, read straight off the metrics snapshot
 - Service health (from `/api/health`)
 - Total requests / error rate / signed tx count
 - Top routes and rolling trend
 
 `/ops` is gated by operator session, same as `/api/metrics`.
+
+### One snapshot, two views
+
+The Ops tab is loaded by a server component
+([`src/app/settings/page.tsx`](../src/app/settings/page.tsx)), which calls
+`getMetricsSnapshot()` in-process and hands the snapshot to
+[`src/components/ops-dashboard.tsx`](../src/components/ops-dashboard.tsx). Consequences worth
+knowing when reading the screen:
+
+- The four counters are **never** recomputed by scanning the audit table. They are the same
+  values the `/api/metrics` body and the Prometheus text export.
+- An empty snapshot renders `0` in each tile instead of an endless spinner.
+- The dashboard still polls `/api/metrics` every 8s for route/traffic refresh, so the numbers
+  keep moving without a reload; each poll returns the same snapshot shape, so both views stay
+  consistent.
+
+Tests: [`src/components/ops-dashboard.snapshot.test.tsx`](../src/components/ops-dashboard.snapshot.test.tsx)
+(renders from a snapshot, never fetches over HTTP) and
+[`src/app/api/metrics/route.test.ts`](../src/app/api/metrics/route.test.ts) (route body
+parity).
 
 ---
 
@@ -225,6 +316,7 @@ For operators who don't want to wire up Prometheus, the `/ops` page renders the 
 - **Per-instance.** If Fortexa is horizontally scaled, each replica exposes its own counters. Aggregate with `sum by (route)` in PromQL.
 - **No histogram.** p95 is a gauge derived from a 500-sample ring buffer, not a true Prometheus histogram. Don't use it for cross-instance percentile aggregation.
 - **Local vs deployed auth.** Locally, no allowlist means any pubkey works. In production, set `FORTEXA_OPERATOR_WALLETS` to restrict.
+- **Ops UI is single-instance.** The dashboard reads the snapshot of the instance that served the page, so a load-balanced setup shows the replica the operator happened to hit. Prometheus is the source of truth for fleet-wide numbers.
 
 
 ---

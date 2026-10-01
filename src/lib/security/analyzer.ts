@@ -4,10 +4,7 @@ import type {
   SecurityEvaluation,
   SecurityFinding,
 } from "@/lib/types/domain";
-import {
-  fetchBlocklist,
-  getBlocklistHealth,
-} from "@/lib/security/blocklist";
+import { fetchBlocklist } from "@/lib/security/blocklist";
 
 /** Configuration for analyzer timeout behavior. */
 export interface AnalyzerConfig {
@@ -18,16 +15,6 @@ export interface AnalyzerConfig {
 export const defaultAnalyzerConfig: AnalyzerConfig = {
   blocklistTimeoutMs: 5000,
 };
-
-/** Get analyzer config from environment or use defaults. */
-function getAnalyzerConfig(): AnalyzerConfig {
-  return {
-    blocklistTimeoutMs: parseInt(
-      process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS || "5000",
-      10,
-    ),
-  };
-}
 
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
@@ -100,7 +87,7 @@ function outputSafetyCheck(outputPreview?: string): SecurityFinding[] {
     }
   }
 
-  if (/private key|secret key|secret seed|mnemonic/i.test(outputPreview)) {
+  if (/private key|secret seed|mnemonic/i.test(outputPreview)) {
     findings.push({
       code: "SECRET_TARGETING",
       title: "Sensitive secret extraction attempt",
@@ -157,14 +144,25 @@ function blocklistCheck(
   return [];
 }
 
+type BlocklistFetchStatus = {
+  blocked: boolean;
+  timedOut: boolean;
+  error?: string;
+};
+
 /**
- * Fetch blocklist with timeout support. Returns findings if successful, empty array if blocked/timed out/failed.
- * Returns status indicating what happened.
+ * Fetch the blocklist and report whether the feed was reachable.
+ * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
+ * failure we fall back to an empty list and report the degraded status.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
-  status: { blocked: boolean; timedOut: boolean; error?: string };
+  status: BlocklistFetchStatus;
 }> {
+  const { blocklistTimeoutMs } = getAnalyzerConfig();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
+
   try {
     const controller = new AbortController();
     const { blocklistTimeoutMs } = getAnalyzerConfig();
@@ -200,12 +198,15 @@ async function fetchBlocklistWithTimeout(): Promise<{
         error: health.lastError || "Blocklist fetch failed" 
       } 
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
 export async function evaluateSecurity(
   action: AgentAction,
 ): Promise<SecurityEvaluation> {
+  const config = getAnalyzerConfig();
   const analyzerStatus: AnalyzerStatus = {
     blocklistStatus: "success",
     isDegraded: false,
@@ -229,7 +230,9 @@ export async function evaluateSecurity(
     analyzerStatus.blocklistError =
       blocklistFetchStatus.error ?? "Blocklist fetch timed out";
     analyzerStatus.isDegraded = true;
-    analyzerStatus.degradationReasons?.push("blocklist_timeout");
+    analyzerStatus.degradationReasons?.push(
+      `blocklist_timeout_${config.blocklistTimeoutMs}ms`,
+    );
   } else if (blocklistFetchStatus.blocked) {
     analyzerStatus.blocklistStatus = "error";
     analyzerStatus.blocklistError = blocklistFetchStatus.error;

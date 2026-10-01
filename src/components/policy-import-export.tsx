@@ -7,12 +7,13 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { PolicyConfig } from "@/lib/types/domain";
-import { policyConfigSchema } from "@/lib/validation/schemas";
+import { exportPolicyDocument, parsePolicyImport, policyImportMatchesActive, type PolicyExport } from "@/lib/policy/import-export";
 import { generatePolicyDiff, groupDiffChanges } from "@/lib/validation/diff";
 
 interface PolicyImportExportProps {
   currentPolicy: PolicyConfig | null;
-  onImportApproved: (policy: PolicyConfig) => Promise<void>;
+  currentVersion: number | null;
+  onImportApproved: (document: PolicyExport) => Promise<void>;
   isOperator: boolean;
   isLoading: boolean;
 }
@@ -21,10 +22,11 @@ type ImportState =
   | { status: "idle" }
   | { status: "validating"; content: string }
   | { status: "error"; error: string }
-  | { status: "diff_preview"; policy: PolicyConfig; jsonContent: string };
+  | { status: "diff_preview"; document: PolicyExport; activePolicy: PolicyConfig };
 
 export function PolicyImportExport({
   currentPolicy,
+  currentVersion,
   onImportApproved,
   isOperator,
   isLoading,
@@ -34,23 +36,34 @@ export function PolicyImportExport({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
-   * Export the current policy as JSON
+   * Export the active policy as JSON
    */
-  function exportPolicy() {
-    if (!currentPolicy) {
-      return;
+  async function loadActivePolicy(): Promise<{ policy: PolicyConfig; version: number }> {
+    const response = await fetch("/api/policy", { cache: "no-store" });
+    if (!response.ok) throw new Error("Failed to load the active policy.");
+    const active = await response.json() as { policy?: PolicyConfig; version?: number };
+    if (!active.policy || typeof active.version !== "number") {
+      throw new Error("Active policy is unavailable.");
     }
+    return { policy: active.policy, version: active.version };
+  }
 
-    const json = JSON.stringify(currentPolicy, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `policy-v${Date.now()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  async function exportPolicy() {
+    try {
+      const active = await loadActivePolicy();
+      const json = JSON.stringify(exportPolicyDocument(active.policy, active.version), null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `policy-v${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setImportState({ status: "error", error: error instanceof Error ? error.message : "Export failed." });
+    }
   }
 
   /**
@@ -61,7 +74,7 @@ export function PolicyImportExport({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const content = e.target?.result as string;
         setImportState({ status: "validating", content });
@@ -78,24 +91,28 @@ export function PolicyImportExport({
           return;
         }
 
-        // Validate against schema
-        const result = policyConfigSchema.safeParse(parsed);
-        if (!result.success) {
-          const errors = result.error.issues
-            .map((e) => `${e.path.join(".") || "root"}: ${e.message}`)
-            .join("\n");
-          setImportState({
-            status: "error",
-            error: `Schema validation failed:\n${errors}`,
-          });
+        if (hasSensitiveField(parsed)) {
+          setImportState({ status: "error", error: "Policy contains a sensitive field and cannot be saved." });
           return;
         }
 
-        // All good, show diff preview
+        const result = parsePolicyImport(parsed);
+        if (!result.ok) {
+          setImportState({ status: "error", error: result.error });
+          return;
+        }
+
+        const active = await loadActivePolicy();
+        const mismatch = policyImportMatchesActive(result.document, active);
+        if (mismatch) {
+          setImportState({ status: "error", error: mismatch });
+          return;
+        }
+
         setImportState({
           status: "diff_preview",
-          policy: result.data,
-          jsonContent: content,
+          document: result.document,
+          activePolicy: active.policy,
         });
       } catch (err) {
         setImportState({
@@ -128,8 +145,10 @@ export function PolicyImportExport({
 
     setImporting(true);
     try {
-      await onImportApproved(importState.policy);
+      await onImportApproved(importState.document);
       setImportState({ status: "idle" });
+    } catch (error) {
+      setImportState({ status: "error", error: error instanceof Error ? error.message : "Import failed." });
     } finally {
       setImporting(false);
     }
@@ -155,7 +174,7 @@ export function PolicyImportExport({
         <CardContent className="flex flex-wrap gap-3">
           <Button
             onClick={exportPolicy}
-            disabled={!currentPolicy || isLoading}
+            disabled={!currentPolicy || currentVersion === null || isLoading}
             variant="outline"
             className="gap-2"
           >
@@ -203,7 +222,7 @@ export function PolicyImportExport({
     return (
       <Card className="border-red-500/40">
         <CardHeader>
-          <CardTitle className="text-red-400">Import Failed</CardTitle>
+          <CardTitle className="text-red-400">Policy Transfer Failed</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <Alert className="border-red-500/40 bg-red-500/10">
@@ -223,8 +242,8 @@ export function PolicyImportExport({
   }
 
   // Diff preview state: show changes before saving
-  if (importState.status === "diff_preview" && currentPolicy) {
-    const diff = generatePolicyDiff(currentPolicy, importState.policy);
+  if (importState.status === "diff_preview") {
+    const diff = generatePolicyDiff(importState.activePolicy, importState.document.policy);
     const grouped = groupDiffChanges(diff);
 
     return (

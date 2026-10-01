@@ -25,6 +25,13 @@ export interface PolicyConfig {
     start: number;
     end: number;
   };
+  /**
+   * Stellar destinations (G... addresses, compared case-insensitively after
+   * trim + uppercase) that require a non-empty memo. A payment to one of
+   * these destinations without a memo is blocked with MEMO_REQUIRED_MISSING.
+   * Evaluated by the shared decision engine so simulate and live decide agree.
+   */
+  memoRequiredDestinations?: string[];
 }
 
 export interface DailyUsage {
@@ -91,6 +98,8 @@ export interface DecisionResult {
   requiresManualApproval: boolean;
   /** Analyzer health metadata - tracks timeouts and degradation. */
   analyzerStatus?: AnalyzerStatus;
+  /** Reason code of the security check (analyzer or blocklist) that denied the action. */
+  reasonCode?: string;
 }
 
 export interface Scenario {
@@ -112,6 +121,7 @@ export interface PaymentQuote {
   asset: StellarAssetId;
   memo: string;
   network: StellarNetworkId;
+  receiptHash?: string;
 }
 
 export interface AuditEntry {
@@ -125,6 +135,8 @@ export interface AuditEntry {
   /** Set when the decision authorizes a Stellar payment execution. */
   paymentQuote?: PaymentQuote;
   stellarTxHash?: string;
+  /** Reason code of the security check that denied this action, when one did. */
+  reasonCode?: string;
   /** SHA-256 digest of this entry's canonical fields + previousHash. */
   entryHash?: string;
   /** entryHash of the preceding entry, or the genesis sentinel for the first. */
