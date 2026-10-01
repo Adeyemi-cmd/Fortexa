@@ -12,6 +12,8 @@ vi.hoisted(() => {
 
 const horizonMocks = vi.hoisted(() => ({
   submitTransaction: vi.fn(),
+  getAuditEntry: vi.fn(),
+  verifyQuote: vi.fn(),
 }));
 
 vi.mock("@stellar/stellar-sdk", async () => {
@@ -34,15 +36,16 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
-import {
-  Account,
-  Asset,
-  Keypair,
-  Memo,
-  Networks,
-  Operation,
-  TransactionBuilder,
-} from "@stellar/stellar-sdk";
+vi.mock("@/lib/storage/audit-store", () => ({
+  getAuditEntryById: horizonMocks.getAuditEntry,
+}));
+
+vi.mock("@/lib/stellar/verify-payment-quote", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/verify-payment-quote")>(),
+  verifyPaymentAgainstQuote: horizonMocks.verifyQuote,
+}));
+
+import { Account, Asset, Keypair, Memo, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as submitSignedPost } from "@/app/api/stellar/submit-signed/route";
@@ -64,7 +67,7 @@ const OPERATOR_WALLET_KEYPAIR = Keypair.random();
 function operatorCookie() {
   const token = createSessionToken({
     email: "idem-operator@fortexa.local",
-    role: "operator",
+    role: "signer",
     userId: OPERATOR_USER_ID,
     expiresInSeconds: 300,
   });
@@ -83,7 +86,7 @@ function submitRequest(
       cookie: operatorCookie(),
       ...extraHeaders,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ auditEntryId: "00000000-0000-4000-8000-000000000000", ...(body as Record<string, unknown>) }),
   });
 }
 
@@ -101,7 +104,7 @@ function buildSignedXdr(amount: string) {
         amount,
       }),
     )
-    .addMemo(Memo.text("fortexa:idem"))
+    .addMemo(Memo.text("fortexa:idempotency-test"))
     .setTimeout(30)
     .build();
   tx.sign(OPERATOR_WALLET_KEYPAIR);
@@ -134,6 +137,11 @@ beforeEach(async () => {
     successful: true,
     result_xdr: "AAAAAAAAAGQAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAA=",
   });
+  horizonMocks.getAuditEntry.mockResolvedValue({
+    id: "00000000-0000-4000-8000-000000000000",
+    paymentQuote: { memo: "fortexa:idempotency-test" },
+  });
+  horizonMocks.verifyQuote.mockReturnValue({ ok: true, quote: {} });
 
   await resetSubmitIdempotencyState(OPERATOR_USER_ID);
 

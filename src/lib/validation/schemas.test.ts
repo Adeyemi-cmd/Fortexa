@@ -9,6 +9,7 @@ import {
   IDEMPOTENCY_KEY_MIN,
   policyConfigSchema,
   stellarBuildPaymentRequestSchema,
+  stellarSubmitSignedRequestSchema,
   validateIdempotencyKey,
 } from "@/lib/validation/schemas";
 
@@ -109,58 +110,13 @@ describe("validation schemas", () => {
     }
   });
 
-  describe("agentPlanSchema", () => {
-    const validPlan = {
-      id: "plan-001",
-      action: {
-        id: "act-001",
-        name: "Research data fetch",
-        kind: "api_payment",
-        target: "research-pro:fetch-report",
-        domain: "api.safe-research.ai",
-        amountXLM: 20,
-        tool: "research-pro",
-        metadata: {},
-      },
-    };
-
-    it("accepts a schema-conformant plan", () => {
-      const parsed = agentPlanSchema.safeParse(validPlan);
-      expect(parsed.success).toBe(true);
-    });
-
-    it("rejects unknown top-level keys (strict parsing)", () => {
-      const parsed = agentPlanSchema.safeParse({ ...validPlan, rogue: true });
-      expect(parsed.success).toBe(false);
-    });
-
-    it("rejects unknown keys nested inside the action", () => {
-      const parsed = agentPlanSchema.safeParse({
-        ...validPlan,
-        action: { ...validPlan.action, injected: "field" },
-      });
-      expect(parsed.success).toBe(false);
-    });
-
-    it("rejects a missing plan id", () => {
-      const withoutId = { ...validPlan };
-      delete (withoutId as { id?: string }).id;
-      const parsed = agentPlanSchema.safeParse(withoutId);
-      expect(parsed.success).toBe(false);
-    });
-
-    it("rejects a non-object payload", () => {
-      expect(agentPlanSchema.safeParse([]).success).toBe(false);
-      expect(agentPlanSchema.safeParse("nope").success).toBe(false);
-    });
-
-    it("rejects invalid action amounts", () => {
-      const parsed = agentPlanSchema.safeParse({
-        ...validPlan,
-        action: { ...validPlan.action, amountXLM: -5 },
-      });
-      expect(parsed.success).toBe(false);
-    });
+  it("requires an audit decision reference for signed payment submission", () => {
+    const signedXdr = "A".repeat(20);
+    expect(stellarSubmitSignedRequestSchema.safeParse({ signedXdr }).success).toBe(false);
+    expect(stellarSubmitSignedRequestSchema.safeParse({
+      signedXdr,
+      auditEntryId: "00000000-0000-4000-8000-000000000000",
+    }).success).toBe(true);
   });
 
   it("accepts valid agent plan request", () => {

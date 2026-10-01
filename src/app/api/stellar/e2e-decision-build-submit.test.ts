@@ -59,6 +59,7 @@ function operatorCookie() {
   const token = createSessionToken({
     email: "e2e-operator@fortexa.local",
     role: "operator",
+    roles: ["operator", "signer"],
     userId: OPERATOR_USER_ID,
     expiresInSeconds: 300,
   });
@@ -168,7 +169,10 @@ async function runOperatorFlow(decisionBody: Record<string, unknown>, paymentAmo
   const signedXdr = unsignedTx.toXDR();
 
   const submitRes = await submitSignedPost(
-    jsonRequest("http://localhost/api/stellar/submit-signed", { signedXdr })
+    jsonRequest("http://localhost/api/stellar/submit-signed", {
+      signedXdr,
+      auditEntryId: decisionPayload.auditEntry.id,
+    })
   );
   expect(submitRes.status).toBe(200);
 

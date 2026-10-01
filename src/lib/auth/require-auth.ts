@@ -30,7 +30,9 @@ export function requireAuth(request: NextRequest, options?: RequireAuthOptions) 
 
   const allowedRoles = options?.allowedRoles ?? ["operator", "viewer"];
 
-  if (!allowedRoles.includes(session.role)) {
+  const sessionRoles = session.roles ?? [session.role];
+
+  if (!allowedRoles.some((role) => sessionRoles.includes(role))) {
     return {
       ok: false as const,
       response: NextResponse.json(

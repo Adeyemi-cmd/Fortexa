@@ -140,7 +140,7 @@ const decisionReceiptSchema = z.object({
 
 export const stellarSubmitSignedRequestSchema = z.object({
   signedXdr: z.string().min(20).max(120000),
-  decisionReceipt: decisionReceiptSchema,
+  auditEntryId: z.string().uuid(),
   idempotencyKey: idempotencyKeySchema.optional(),
 });
 

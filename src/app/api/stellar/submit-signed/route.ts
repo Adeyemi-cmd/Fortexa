@@ -29,6 +29,7 @@ import {
   putIdempotencyRecord,
 } from "@/lib/storage/submit-idempotency-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
 import {
   stellarSubmitSignedRequestSchema,
   validateIdempotencyKey,
@@ -38,6 +39,7 @@ import {
   toPublicValidationDetails,
 } from "@/lib/validation/errors";
 import { normalizeHorizonError } from "@/lib/utils/horizonErrors";
+import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 
 type HorizonErrorContext = {
   explanation: string;
@@ -278,7 +280,7 @@ export async function POST(request: NextRequest) {
   maybeRunCleanup();
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       logWarn("Submit signed route unauthorized", context);
@@ -434,6 +436,41 @@ export async function POST(request: NextRequest) {
           error:
             "Signed transaction source account does not match your session wallet.",
         },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (!xdrSourceResult.payment) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction does not contain one authorized native payment." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
+    if (!auditEntry?.paymentQuote || xdrSourceResult.payment.memo !== auditEntry.paymentQuote.memo) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction memo does not match the authorized payment quote." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const authorization = verifyPaymentAgainstQuote(auditEntry, {
+      ...xdrSourceResult.payment,
+      network: "testnet",
+    });
+    if (!authorization.ok) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: authorization.status,
+        body: { error: authorization.error, field: authorization.field },
         headers: rateLimitHeaders(rate),
       });
     }

@@ -168,24 +168,15 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
-  // Nothing configured: skip the network entirely, nothing is degraded.
-  if (!getBlocklistHealth().configured) {
-    return { blocklist: [], status: { blocked: false, timedOut: false } };
-  }
-
   try {
     const blocklist = await fetchBlocklist();
-
     const health = getBlocklistHealth();
     if (health.lastError) {
-      // fetchBlocklist swallows errors internally but records health; a stale
-      // cache may still be returned. Treat the refresh failure as degraded.
-      const isTimeout = /abort|timeout/i.test(health.lastError);
       return {
         blocklist,
         status: {
           blocked: true,
-          timedOut: isTimeout,
+          timedOut: /abort|timeout/i.test(health.lastError),
           error: health.lastError,
         },
       };
@@ -193,15 +184,16 @@ async function fetchBlocklistWithTimeout(): Promise<{
 
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "AbortError";
-    const message = err instanceof Error ? err.message : "Unknown blocklist fetch error";
+    const health = getBlocklistHealth();
+    const error = health.lastError ?? (err instanceof Error ? err.message : "Blocklist fetch failed");
+    const timedOut = (err instanceof Error && err.name === "AbortError") || /abort|timeout/i.test(error);
 
     return {
       blocklist: [],
       status: {
         blocked: true,
-        timedOut: isTimeout,
-        error: message,
+        timedOut,
+        error,
       },
     };
   }

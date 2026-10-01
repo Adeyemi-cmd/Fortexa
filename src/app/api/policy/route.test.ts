@@ -29,6 +29,18 @@ function viewerCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
+function signerCookie() {
+  process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: "signer-user-id",
+    expiresInSeconds: 120,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
 function makePolicyGetRequest(cookie: string) {
   return new NextRequest("http://localhost/api/policy", {
     method: "GET",
@@ -101,6 +113,11 @@ describe("/api/policy route", () => {
     });
     const response = await POST(request);
 
+    expect(response.status).toBe(403);
+  });
+
+  it("returns 403 for signer-only policy updates", async () => {
+    const response = await POST(makePolicyPostRequest(signerCookie(), POLICY_PAYLOAD));
     expect(response.status).toBe(403);
   });
 

@@ -2,19 +2,13 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { NextRequest } from "next/server";
 
-import { isSessionGenerationCurrent, registerSession, rotateSessionGeneration } from "@/lib/auth/session-store";
-
-export type AuthRole = "operator" | "viewer";
+export type AuthRole = "operator" | "signer" | "viewer";
 
 export type AuthSession = {
   userId: string;
   email: string;
   role: AuthRole;
-  /**
-   * Session id. Minted once at login and carried forward by refresh, so every
-   * token generation of one login shares it. Logout revokes by this id.
-   */
-  sid: string;
+  roles?: AuthRole[];
   exp: number;
   gen: number;
   sid: string | null;
@@ -50,30 +44,14 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-function normalizeGeneration(value: unknown) {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
-
-function normalizeSessionId(value: unknown) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-export function createSessionToken(input: {
-  email: string;
-  role: AuthRole;
-  userId?: string;
-  expiresInSeconds?: number;
-  generation?: number;
-  sessionId?: string | null;
-}) {
+export function createSessionToken(input: { email: string; role: AuthRole; roles?: AuthRole[]; userId?: string; expiresInSeconds?: number }) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
-    exp: now + (input.expiresInSeconds ?? DEFAULT_SESSION_TTL_SECONDS),
-    gen: normalizeGeneration(input.generation),
-    sid: normalizeSessionId(input.sessionId === undefined ? randomUUID() : input.sessionId),
+    roles: input.roles ?? [input.role],
+    exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));
@@ -121,7 +99,11 @@ export function verifySessionToken(token: string, options?: VerifySessionTokenOp
       return null;
     }
 
-    if (parsed.role !== "operator" && parsed.role !== "viewer") {
+    if (parsed.role !== "operator" && parsed.role !== "signer" && parsed.role !== "viewer") {
+      return null;
+    }
+
+    if (parsed.roles !== undefined && (!Array.isArray(parsed.roles) || parsed.roles.some((role) => role !== "operator" && role !== "signer" && role !== "viewer"))) {
       return null;
     }
 
