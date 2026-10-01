@@ -46,7 +46,7 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
-      fieldErrors[field] = (messages as string[] | undefined) ?? [];
+      fieldErrors[field] = Array.isArray(messages) ? messages : [];
     }
   }
 
@@ -70,9 +70,6 @@ export function logValidationFailure(
       ...context,
       validation: error.flatten() as unknown as Record<string, unknown>,
       body: rawBody,
-      horizonResultCodes: Array.from(
-        new Set((JSON.stringify(rawBody ?? {}) + " " + error.message).match(HORIZON_RESULT_CODE_PATTERN) ?? []),
-      ),
-    }) as unknown as LogContext,
+    }),
   );
 }

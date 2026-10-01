@@ -147,6 +147,18 @@ function blocklistCheck(
   return [];
 }
 
+function isTimeoutFailure(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout/i.test(message);
+}
+
 /**
  * Fetch the blocklist and report whether the feed was reachable.
  * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
@@ -159,17 +171,34 @@ async function fetchBlocklistWithTimeout(): Promise<{
   const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     const blocklist = await fetchBlocklist();
+    const health = getBlocklistHealth();
+
+    if (health.configured && health.lastError) {
+      return {
+        blocklist,
+        status: {
+          blocked: true,
+          timedOut: isTimeoutFailure(health.lastError),
+          error: health.lastError,
+        },
+      };
+    }
+
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown fetch error";
     const health = getBlocklistHealth();
     const error =
-      health.lastError ??
-      (err instanceof Error ? err.message : "Unknown fetch error");
-    const timedOut =
-      (err instanceof Error &&
-        (err.name === "AbortError" || err.name === "TimeoutError")) ||
-      /abort|timed? ?out/i.test(error);
-    return { blocklist: [], status: { blocked: true, timedOut, error } };
+      health.configured && health.lastError ? health.lastError : message;
+
+    return {
+      blocklist: [],
+      status: {
+        blocked: true,
+        timedOut: isTimeoutFailure(err) || isTimeoutFailure(error),
+        error,
+      },
+    };
   }
 }
 

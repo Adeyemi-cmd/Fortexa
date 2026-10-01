@@ -11,7 +11,7 @@ export type LogContext = {
   userId?: string;
   role?: string;
   statusCode?: number;
-  [key: string]: string | number | boolean | null | undefined;
+  [key: string]: unknown;
 };
 
 function serialize(level: LogLevel, message: string, context?: LogContext) {

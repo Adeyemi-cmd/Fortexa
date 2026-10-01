@@ -82,7 +82,7 @@ vi.mock("@/lib/stellar/network-config", () => ({
 }));
 
 vi.mock("@/lib/stellar/client", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/stellar/client")>();
+  const actual = await importOriginal<Record<string, unknown>>();
   return {
     ...actual,
     submitSignedTransactionXdr: vi.fn(async () => ({
