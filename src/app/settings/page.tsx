@@ -4,6 +4,7 @@ import { ActivityTimeline } from "@/components/activity-timeline";
 import { OpsDashboard } from "@/components/ops-dashboard";
 import { PolicyEditor } from "@/components/policy-editor";
 import { ScenariosCatalog } from "@/components/scenarios-catalog";
+import { evaluateScenarioCatalog } from "@/lib/scenarios/evaluate";
 import { TabNav, type TabItem } from "@/components/ui/tab-nav";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
@@ -37,9 +38,8 @@ export default async function SettingsPage({
   const session = sessionToken ? verifySessionToken(sessionToken) : null;
   const userId = session?.userId;
   const entries = userId ? await listAuditEntries(userId) : [];
-  const network = resolveStellarNetworkConfig();
-  const horizonUrl = getStellarHorizonUrl();
-  const networkPassphrase = getStellarNetworkPassphrase();
+  const scenarioEvaluations =
+    activeTab === "scenarios" ? await evaluateScenarioCatalog() : [];
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -81,7 +81,9 @@ export default async function SettingsPage({
           </div>
         </div>
       ) : null}
-      {activeTab === "scenarios" ? <ScenariosCatalog /> : null}
+      {activeTab === "scenarios" ? (
+        <ScenariosCatalog evaluations={scenarioEvaluations} />
+      ) : null}
       {activeTab === "ops" ? <OpsDashboard /> : null}
       {activeTab === "activity" ? <ActivityTimeline entries={entries} /> : null}
     </div>

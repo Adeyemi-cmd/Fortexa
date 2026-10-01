@@ -154,47 +154,56 @@ function blocklistCheck(
   return [];
 }
 
-function isTimeoutFailure(error: unknown): boolean {
-  if (
-    error instanceof Error &&
-    (error.name === "AbortError" || error.name === "TimeoutError")
-  ) {
-    return true;
-  }
-
-  const message = error instanceof Error ? error.message : String(error);
-  return /abort|timeout/i.test(message);
-}
+type BlocklistFetchStatus = {
+  blocked: boolean;
+  timedOut: boolean;
+  error?: string;
+};
 
 /**
- * Fetch blocklist with failure tolerance.
- *
- * `fetchBlocklist` rejects on any failure (network error, non-200, timeout).
- * A failed refresh must never take down decisioning, so the rejection is
- * converted to a degraded status here. When the feed has cached domains from a
- * previous successful refresh, they are still served on the next call, so the
- * catch path receives an empty list only when no cached data exists.
+ * Fetch the external blocklist with a timeout guard. Never throws: failures
+ * are surfaced through the returned status so the analyzer can degrade
+ * gracefully instead of failing the whole evaluation. When no blocklist URL is
+ * configured the fetch is skipped entirely and an empty list is returned.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
-  status: { blocked: boolean; timedOut: boolean; error?: string };
+  status: BlocklistFetchStatus;
 }> {
+  if (!process.env.FORTEXA_BLOCKLIST_URL) {
+    return { blocklist: [], status: { blocked: false, timedOut: false } };
+  }
+
   const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    // fetchBlocklist applies its own configured timeout and rethrows on
-    // failure, so surface the outcome to the caller rather than throwing.
     const blocklist = await fetchBlocklist();
+    const health = getBlocklistHealth();
+    if (health.lastError) {
+      return {
+        blocklist,
+        status: { blocked: true, timedOut: false, error: health.lastError },
+      };
+    }
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "AbortError";
+    const message = err instanceof Error ? err.message : "Unknown fetch error";
+    const health = getBlocklistHealth();
+    const timedOut =
+      (err instanceof Error && err.name === "AbortError") ||
+      /abort|timeout/i.test(health.lastError ?? message);
     return {
       blocklist: [],
       status: {
         blocked: true,
-        timedOut: isTimeout,
-        error: err instanceof Error ? err.message : "Unknown error",
+        timedOut,
+        error: health.lastError ?? message,
       },
     };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
