@@ -8,6 +8,9 @@ const SENSITIVE_KEYS = new Set([
   "groq_api_key",
   "secret",
   "token",
+  "password",
+  "challenge",
+  "memo",
 ]);
 
 function isSensitiveKey(key: string): boolean {

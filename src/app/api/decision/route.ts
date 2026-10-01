@@ -27,6 +27,13 @@ import { logValidationFailure, toPublicValidationDetails } from "@/lib/validatio
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/decision");
+  let requestBody: unknown;
+  const respond: typeof jsonWithRequestContext = (incoming, input) =>
+    jsonWithRequestContext(incoming, {
+      ...input,
+      logExchange: true,
+      requestBody,
+    });
 
   const rate = await consumeRateLimit(request, {
     key: "decision",
@@ -36,7 +43,7 @@ export async function POST(request: NextRequest) {
 
   if (!rate.ok) {
     logWarn("Decision route rate limited", context);
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: 429,
@@ -56,11 +63,12 @@ export async function POST(request: NextRequest) {
     const userId = auth.session.userId;
 
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
+    requestBody = rawBody;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
       logValidationFailure("Decision route validation failed", { ...context, userId }, parsedBody.error, rawBody);
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
@@ -83,7 +91,7 @@ export async function POST(request: NextRequest) {
 
     if (!action) {
       logWarn("Decision route action missing", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
@@ -149,7 +157,7 @@ export async function POST(request: NextRequest) {
 
     recordDecisionOutcome(finalDecision);
 
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: 200,
@@ -170,7 +178,7 @@ export async function POST(request: NextRequest) {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",
     });
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: 500,

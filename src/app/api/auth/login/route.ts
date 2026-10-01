@@ -36,6 +36,13 @@ export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/auth/login");
   const clientIp = readClientIp(request.headers);
+  let requestBody: unknown;
+  const respond: typeof jsonWithRequestContext = (incoming, input) =>
+    jsonWithRequestContext(incoming, {
+      ...input,
+      logExchange: true,
+      requestBody,
+    });
 
   const rate = await consumeRateLimit(request, {
     key: "auth-login",
@@ -45,7 +52,7 @@ export async function POST(request: NextRequest) {
 
   if (!rate.ok) {
     logWarn("Auth login rate limited", context);
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/auth/login",
       startedAtMs,
       status: 429,
@@ -56,11 +63,12 @@ export async function POST(request: NextRequest) {
 
   try {
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
+    requestBody = rawBody;
     const parsed = loginSchema.safeParse(rawBody);
 
     if (!parsed.success) {
       logValidationFailure("Auth login validation failed", context, parsed.error, rawBody);
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: 400,
@@ -74,7 +82,7 @@ export async function POST(request: NextRequest) {
     const lockState = await isLoginLocked(normalizedWallet, clientIp);
     if (lockState.locked) {
       logWarn("Auth login blocked by lockout", { ...context, wallet: normalizedWallet, ip: clientIp });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: 423,
@@ -105,7 +113,7 @@ export async function POST(request: NextRequest) {
         code: challengeResult.code,
       });
 
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: challengeResult.code === "invalid_signature" ? 401 : 400,
@@ -126,7 +134,7 @@ export async function POST(request: NextRequest) {
     if (!role) {
       const failure = await registerLoginFailure(normalizedWallet, clientIp);
       logWarn("Auth login unknown wallet", { ...context, wallet: normalizedWallet });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/auth/login",
         startedAtMs,
         status: 401,
@@ -153,7 +161,7 @@ export async function POST(request: NextRequest) {
       userId,
     });
 
-    const response = jsonWithRequestContext(request, {
+    const response = respond(request, {
       route: "/api/auth/login",
       startedAtMs,
       status: 200,
@@ -183,7 +191,7 @@ export async function POST(request: NextRequest) {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",
     });
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/auth/login",
       startedAtMs,
       status: 500,
