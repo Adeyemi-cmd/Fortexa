@@ -96,6 +96,15 @@ export function parseXlmNumberToStroops(value: number): StroopParseResult {
 }
 
 /**
+ * Converts a display amount to stroops with the exact decimal parser.
+ * Numbers go through their shortest decimal form; strings are never scaled
+ * in floating point. Values finer than one stroop are rejected.
+ */
+export function amountToStroops(value: number | string): StroopParseResult {
+  return typeof value === "number" ? parseXlmNumberToStroops(value) : parseXlmToStroops(value);
+}
+
+/**
  * Converts a number to the nearest stroop, half away from zero.
  *
  * For *comparisons* — a cap, a running total — the question is which side of a

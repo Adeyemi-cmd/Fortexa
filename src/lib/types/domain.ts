@@ -19,6 +19,10 @@ export interface PolicyConfig {
   blockedTools: string[];
   perTxCapXLM: number;
   dailyCapXLM: number;
+  /** Exact per-transaction cap in stroops, derived from perTxCapXLM. */
+  perTxCapStroops?: string;
+  /** Exact daily cap in stroops, derived from dailyCapXLM. */
+  dailyCapStroops?: string;
   maxToolCallsPerDay: number;
   riskThreshold: number;
   allowedHours?: {
@@ -118,6 +122,8 @@ export type StellarAssetId = "native";
 export interface PaymentQuote {
   destination: string;
   amountXLM: string;
+  /** Exact payment amount in stroops, derived from amountXLM. */
+  amountStroops?: string;
   asset: StellarAssetId;
   memo: string;
   network: StellarNetworkId;

@@ -1,4 +1,4 @@
-import { evaluatePolicy } from "@/lib/policy/engine";
+import { evaluatePolicy, readAmountStroops } from "@/lib/policy/engine";
 import { evaluateSecurity } from "@/lib/security/analyzer";
 import { checkBlocklist } from "@/lib/security/blocklist";
 import type {
@@ -22,6 +22,12 @@ function decideExplanation(result: DecisionResult): string {
   }
 
   return "Fortexa approved this action. Policy checks and risk analysis are within trusted operating bounds.";
+}
+
+/** Payment amount stored on an allowing decision, as a stroop integer string. */
+export function decisionAmountStroops(amountXLM: number): string | null {
+  const stroops = readAmountStroops(amountXLM);
+  return stroops === null ? null : stroops.toString();
 }
 
 export async function evaluateDecision(
