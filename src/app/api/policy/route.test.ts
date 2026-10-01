@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
+import { Networks } from "@stellar/stellar-sdk";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { DEFAULT_JSON_BODY_MAX_BYTES } from "@/lib/http/read-json-body";
+import { getStellarNetworkFingerprint } from "@/lib/stellar/network-config";
 import { GET, POST } from "@/app/api/policy/route";
 
 function operatorCookie() {
@@ -23,6 +25,18 @@ function viewerCookie() {
     email: "viewer@fortexa.local",
     role: "viewer",
     userId: "viewer-user-id",
+    expiresInSeconds: 120,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
+function signerCookie() {
+  process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: "signer-user-id",
     expiresInSeconds: 120,
   });
 
@@ -60,6 +74,59 @@ const POLICY_PAYLOAD = {
 };
 
 describe("/api/policy route", () => {
+  it("rejects secret-shaped payload fields before saving", async () => {
+    const response = await POST(makePolicyPostRequest(operatorCookie(), {
+      ...POLICY_PAYLOAD,
+      auth: { sessionToken: "fixture-token" },
+    }));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toContain("sensitive field");
+  });
+
+  it("rejects saves when the server Horizon and passphrase disagree", async () => {
+    const previousHorizon = process.env.STELLAR_HORIZON_URL;
+    const previousPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+    try {
+      const response = await POST(makePolicyPostRequest(operatorCookie(), POLICY_PAYLOAD));
+      expect(response.status).toBe(409);
+    } finally {
+      if (previousHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
+      else process.env.STELLAR_HORIZON_URL = previousHorizon;
+      if (previousPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = previousPassphrase;
+    }
+  });
+
+  it("rejects a stale settings page after the server network changes", async () => {
+    const previousHorizon = process.env.STELLAR_HORIZON_URL;
+    const previousPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
+    process.env.STELLAR_HORIZON_URL = "https://horizon-testnet.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+    const displayedFingerprint = getStellarNetworkFingerprint();
+    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.PUBLIC;
+    try {
+      const response = await POST(new NextRequest("http://localhost/api/policy", {
+        method: "POST",
+        headers: {
+          cookie: operatorCookie(),
+          "content-type": "application/json",
+          "x-fortexa-network-fingerprint": displayedFingerprint,
+        },
+        body: JSON.stringify(POLICY_PAYLOAD),
+      }));
+      expect(response.status).toBe(409);
+    } finally {
+      if (previousHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
+      else process.env.STELLAR_HORIZON_URL = previousHorizon;
+      if (previousPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
+      else process.env.STELLAR_NETWORK_PASSPHRASE = previousPassphrase;
+    }
+  });
+
   it("returns 401 when unauthenticated", async () => {
     const request = new NextRequest("http://localhost/api/policy", { method: "GET" });
     const response = await GET(request);
@@ -101,6 +168,11 @@ describe("/api/policy route", () => {
     });
     const response = await POST(request);
 
+    expect(response.status).toBe(403);
+  });
+
+  it("returns 403 for signer-only policy updates", async () => {
+    const response = await POST(makePolicyPostRequest(signerCookie(), POLICY_PAYLOAD));
     expect(response.status).toBe(403);
   });
 
@@ -269,5 +341,57 @@ describe("/api/policy route", () => {
 
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toBe("Invalid policy payload.");
+  });
+
+  it("rejects a direct write of a schema-invalid document with API field errors", async () => {
+    const cookie = operatorCookie();
+
+    const response = await POST(
+      makePolicyPostRequest(cookie, {
+        ...POLICY_PAYLOAD,
+        perTxCapXLM: -100,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as {
+      error: string;
+      details?: { fieldErrors?: Record<string, string[]> };
+    };
+    expect(payload.error).toBe("Invalid policy payload.");
+    expect(payload.details?.fieldErrors?.perTxCapXLM?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("rejects a direct write containing duplicate rule identifiers with 422", async () => {
+    const cookie = operatorCookie();
+
+    const response = await POST(
+      makePolicyPostRequest(cookie, {
+        ...POLICY_PAYLOAD,
+        allowedDomains: ["dup.example.com", "dup.example.com"],
+      }),
+    );
+
+    expect(response.status).toBe(422);
+    const payload = (await response.json()) as { code?: string; error?: string };
+    expect(payload.code).toBe("DUPLICATE_RULE_IDENTIFIER");
+    expect(payload.error).toContain("dup.example.com");
+  });
+
+  it("does not advance the policy version after a rejected direct write", async () => {
+    const cookie = operatorCookie();
+
+    const seed = await POST(makePolicyPostRequest(cookie, POLICY_PAYLOAD));
+    expect(seed.status).toBe(200);
+    const seedBody = (await seed.json()) as { version: number };
+
+    const rejected = await POST(
+      makePolicyPostRequest(cookie, { ...POLICY_PAYLOAD, riskThreshold: 0 }),
+    );
+    expect(rejected.status).toBe(400);
+
+    const verify = await GET(makePolicyGetRequest(cookie));
+    const verifyBody = (await verify.json()) as { version: number };
+    expect(verifyBody.version).toBe(seedBody.version);
   });
 });

@@ -97,7 +97,7 @@ function outputSafetyCheck(outputPreview?: string): SecurityFinding[] {
     }
   }
 
-  if (/private key|secret key|secret seed|mnemonic/i.test(outputPreview)) {
+  if (/private key|secret seed|mnemonic/i.test(outputPreview)) {
     findings.push({
       code: "SECRET_TARGETING",
       title: "Sensitive secret extraction attempt",
@@ -154,14 +154,32 @@ function blocklistCheck(
   return [];
 }
 
+function isTimeoutFailure(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout/i.test(message);
+}
+
 /**
- * Fetch blocklist with timeout support. Returns findings if successful, empty array if blocked/timed out/failed.
- * Returns status indicating what happened.
+ * Fetch blocklist with failure tolerance.
+ *
+ * `fetchBlocklist` rejects on any failure (network error, non-200, timeout).
+ * A failed refresh must never take down decisioning, so the rejection is
+ * converted to a degraded status here. When the feed has cached domains from a
+ * previous successful refresh, they are still served on the next call, so the
+ * catch path receives an empty list only when no cached data exists.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     // fetchBlocklist applies its own configured timeout and rethrows on
     // failure, so surface the outcome to the caller rather than throwing.

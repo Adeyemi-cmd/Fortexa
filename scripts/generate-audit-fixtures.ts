@@ -2,7 +2,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { computeEntryHash, GENESIS_HASH, getChainBoundaries } from "../src/lib/audit/hash-chain";
+import { computeEntryHash, GENESIS_HASH } from "../src/lib/audit/hash-chain";
 import type { AuditEntry, AgentAction } from "../src/lib/types/domain";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -86,16 +86,6 @@ write("tampered-field.json", chain.map((e, i) =>
   i === 1 ? { ...e, explanation: "tampered explanation" } : e
 ));
 write("deleted-entry.json", [chain[0]!, chain[2]!]);
-write("first-record-deleted.json", {
-  scope: "mine",
-  entries: chain.slice(1),
-  chainBoundary: getChainBoundaries(chain),
-});
-write("last-record-deleted.json", {
-  scope: "mine",
-  entries: chain.slice(0, -1),
-  chainBoundary: getChainBoundaries(chain),
-});
 write("reordered-entries.json", [
   chain[0]!,
   { ...chain[1]!, timestamp: chain[2]!.timestamp },

@@ -4,7 +4,7 @@ import {
   readSharedLockout,
   removeSharedLockout,
   writeSharedLockout,
-} from "@/lib/security/shared-security-state";
+} from @"lib/security/shared-security-state";
 
 type LockoutRecord = {
   attempts: number;
@@ -12,6 +12,22 @@ type LockoutRecord = {
 };
 
 const records = new Map<string, LockoutRecord>();
+
+export type Clock = () => number;
+
+let clock: Clock = () => Date.now();
+
+export function setLoginLockoutClock(nextClock: Clock) {
+  clock = nextClock;
+}
+
+export function resetLoginLockoutClock() {
+  clock = () => Date.now();
+}
+
+function nowMs() {
+  return clock();
+}
 
 function getMaxAttempts() {
   const parsed = Number(process.env.FORTEXA_AUTH_MAX_ATTEMPTS ?? 5);
@@ -51,7 +67,7 @@ export async function isLoginLocked(email: string, ip: string) {
     return { locked: false as const, retryAfterSeconds: 0 };
   }
 
-  const now = Date.now();
+  const now = nowMs();
   if (record.lockedUntilMs <= now) {
     if (useSharedState) {
       await removeSharedLockout(key);
@@ -68,7 +84,7 @@ export async function isLoginLocked(email: string, ip: string) {
 }
 
 export async function registerLoginFailure(email: string, ip: string) {
-  const now = Date.now();
+  const now = nowMs();
   const maxAttempts = getMaxAttempts();
   const lockMs = Math.max(1000, getLockMinutes() * 60 * 1000);
   const useSharedState = isSharedSecurityStateEnabled();

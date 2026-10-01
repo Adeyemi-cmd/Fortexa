@@ -296,77 +296,172 @@ export type LoginWithFreighterStep =
   | "signing"
   | "verifying";
 
+/**
+ * A challenge issued by `/api/auth/challenge`. The API consumes a challenge on
+ * the first login submit, whatever the outcome, so the client may hold one
+ * only for the duration of a single attempt.
+ */
+export type LoginChallenge = {
+  challengeId: string;
+  message: string;
+  publicKey: string;
+  expiresAtMs: number;
+};
+
+/**
+ * Where a login attempt keeps its challenge. A React ref satisfies this shape.
+ * `loginWithFreighter` empties it at the start of every attempt and again after
+ * success, failure, or expiry, so a consumed challenge is never resubmitted.
+ */
+export type LoginChallengeSlot = { current: LoginChallenge | null };
+
+export type LoginWithFreighterResult =
+  | { ok: true; role: string; wallet: string }
+  | { ok: false; code: string; message: string; retryAfterSeconds?: number };
+
+const GENERIC_LOGIN_ERROR = "Sign in failed.";
+
+async function readJsonBody<T>(response: Response): Promise<Partial<T>> {
+  try {
+    return ((await response.json()) ?? {}) as Partial<T>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Drops an error message that echoes any part of the signed payload (the
+ * challenge text or the wallet signature). The error code still identifies the
+ * failure, so nothing useful is lost.
+ */
+function withoutSignedPayload(message: string | undefined, signedPayload: string[]) {
+  if (!message) {
+    return GENERIC_LOGIN_ERROR;
+  }
+  return signedPayload.some((part) => part && message.includes(part)) ? GENERIC_LOGIN_ERROR : message;
+}
+
+export function formatLoginError(result: { code: string; message: string; retryAfterSeconds?: number }) {
+  const retry = result.retryAfterSeconds ? ` Try again in ${result.retryAfterSeconds}s.` : "";
+  return `${result.message}${retry} (code: ${result.code})`;
+}
+
 export async function loginWithFreighter(options?: {
   onStep?: (step: LoginWithFreighterStep) => void;
-}): Promise<
-  | { ok: true; role: string; wallet: string }
-  | { ok: false; message: string; retryAfterSeconds?: number }
-> {
-  options?.onStep?.("connecting");
-  const connected = await connectFreighterWallet();
-  if (!connected.ok) {
-    return { ok: false, message: connected.message };
-  }
+  challengeSlot?: LoginChallengeSlot;
+}): Promise<LoginWithFreighterResult> {
+  const slot: LoginChallengeSlot = options?.challengeSlot ?? { current: null };
+  // Never carry a challenge over from an earlier attempt: it was either
+  // consumed by the API or abandoned, and both are dead.
+  slot.current = null;
 
-  options?.onStep?.("challenge");
-  const challengeResponse = await fetch("/api/auth/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ publicKey: connected.publicKey }),
-  });
+  try {
+    options?.onStep?.("connecting");
+    const connected = await connectFreighterWallet();
+    if (!connected.ok) {
+      return { ok: false, code: `freighter_${connected.code}`, message: connected.message };
+    }
 
-  const challengePayload = (await challengeResponse.json()) as {
-    error?: string;
-    challengeId?: string;
-    message?: string;
-  };
+    // Fetch the challenge only now, immediately before signing, so the
+    // signature always covers a challenge the API has not seen submitted yet.
+    options?.onStep?.("challenge");
+    const challengeResponse = await fetch("/api/auth/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ publicKey: connected.publicKey }),
+      cache: "no-store",
+    });
 
-  if (!challengeResponse.ok || !challengePayload.challengeId || !challengePayload.message) {
-    return {
-      ok: false,
-      message: challengePayload.error ?? "Could not create login challenge.",
-    };
-  }
+    const challengePayload = await readJsonBody<{
+      error: string;
+      code: string;
+      challengeId: string;
+      message: string;
+      expiresAt: string;
+    }>(challengeResponse);
 
-  options?.onStep?.("signing");
-  const signed = await signFreighterMessage({
-    message: challengePayload.message,
-    sourcePublicKey: connected.publicKey,
-  });
+    const expiresAtMs = challengePayload.expiresAt ? Date.parse(challengePayload.expiresAt) : Number.NaN;
 
-  if (!signed.ok) {
-    return { ok: false, message: signed.message };
-  }
+    if (
+      !challengeResponse.ok ||
+      !challengePayload.challengeId ||
+      !challengePayload.message ||
+      !Number.isFinite(expiresAtMs)
+    ) {
+      return {
+        ok: false,
+        code: challengePayload.code ?? `challenge_http_${challengeResponse.status}`,
+        message: challengePayload.error ?? "Could not create login challenge.",
+      };
+    }
 
-  options?.onStep?.("verifying");
-  const response = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      publicKey: connected.publicKey,
+    const challenge: LoginChallenge = {
       challengeId: challengePayload.challengeId,
-      signature: signed.signature,
-    }),
-  });
-
-  const payload = (await response.json()) as {
-    error?: string;
-    role?: string;
-    wallet?: string;
-    retryAfterSeconds?: number;
-  };
-
-  if (!response.ok || payload.error) {
-    return {
-      ok: false,
-      message: payload.error ?? "Sign in failed.",
-      retryAfterSeconds: payload.retryAfterSeconds,
+      message: challengePayload.message,
+      publicKey: connected.publicKey,
+      expiresAtMs,
     };
-  }
+    slot.current = challenge;
 
-  return {
-    ok: true,
-    role: payload.role ?? "operator",
-    wallet: payload.wallet ?? connected.publicKey,
-  };
+    options?.onStep?.("signing");
+    const signed = await signFreighterMessage({
+      message: challenge.message,
+      sourcePublicKey: connected.publicKey,
+    });
+
+    if (!signed.ok) {
+      return { ok: false, code: `freighter_${signed.code}`, message: signed.message };
+    }
+
+    // Expiry is inclusive, matching isChallengeExpired on the server. A
+    // challenge that lapsed while the wallet prompt was open is not submitted.
+    if (challenge.expiresAtMs <= Date.now()) {
+      return {
+        ok: false,
+        code: "expired",
+        message: "Login challenge expired before it was submitted. Sign in again to request a new challenge.",
+      };
+    }
+
+    options?.onStep?.("verifying");
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        publicKey: connected.publicKey,
+        challengeId: challenge.challengeId,
+        signature: signed.signature,
+      }),
+      cache: "no-store",
+    });
+
+    const payload = await readJsonBody<{
+      error: string;
+      code: string;
+      role: string;
+      wallet: string;
+      retryAfterSeconds: number;
+    }>(response);
+
+    if (!response.ok || payload.error) {
+      return {
+        ok: false,
+        code: payload.code ?? `http_${response.status}`,
+        message: withoutSignedPayload(payload.error, [signed.signature, challenge.message]),
+        retryAfterSeconds: payload.retryAfterSeconds,
+      };
+    }
+
+    return {
+      ok: true,
+      role: payload.role ?? "operator",
+      wallet: payload.wallet ?? connected.publicKey,
+    };
+  } catch {
+    return { ok: false, code: "network_error", message: "Could not reach the login service. Try again." };
+  } finally {
+    // The API consumed the challenge (or it expired, or the attempt was
+    // abandoned). Either way it must not be submitted again.
+    slot.current = null;
+  }
 }

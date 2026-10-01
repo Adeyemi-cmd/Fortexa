@@ -1,6 +1,11 @@
 import { promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 
-import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
+import {
+  GENESIS_HASH,
+  computeEntryHash,
+  verifyHashChain,
+} from "@/lib/audit/hash-chain";
 import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
@@ -9,6 +14,8 @@ type AuditStoreFile = {
   auditByUser: Record<string, AuditEntry[]>;
   usageByUser: Record<string, DailyUsage>;
 };
+
+export const AUDIT_EXPORT_MAX_ROWS = 10000;
 
 export type AuditFilter = {
   from?: string;
@@ -26,6 +33,8 @@ const VALID_DECISIONS: DecisionType[] = [
 ];
 const VALID_DECISION_SET = new Set<string>(VALID_DECISIONS);
 
+const REDACTED = "[REDACTED]";
+
 export function validateAuditFilter(filter: AuditFilter): string | null {
   if (filter.from !== undefined && isNaN(Date.parse(filter.from))) {
     return "Invalid 'from' date. Use ISO 8601 format (e.g. 2025-01-01T00:00:00Z).";
@@ -40,6 +49,70 @@ export function validateAuditFilter(filter: AuditFilter): string | null {
     return `Invalid decision '${filter.decision}'. Must be one of: ${VALID_DECISIONS.join(", ")}.`;
   }
   return null;
+}
+
+const CREDENTIAL_KEY_PATTERN =
+  /(secret|token|password|passwd|api[_-]?key|apikey|authorization|auth|credential|private[_-]?key|access[_-]?key|bearer|cookie|session)/i;
+
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (CREDENTIAL_KEY_PATTERN.test(key)) {
+        result[key] = REDACTED;
+      } else {
+        result[key] = redactValue(nested);
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+export function redactAuditEntry(entry: AuditEntry): AuditEntry {
+  return redactValue(entry) as AuditEntry;
+}
+
+export type AuditExportResult =
+  | { ok: true; entries: AuditEntry[] }
+  | { ok: false; error: string; code: "CHAIN_INVALID" | "ROW_CAP_EXCEEDED" };
+
+export async function exportVerifiedAuditEntries(
+  userId: string,
+  filter?: AuditFilter,
+): Promise<AuditExportResult> {
+  const entries = await listAuditEntries(userId, filter);
+  return verifyAndRedactExport(entries);
+}
+
+export function verifyAndRedactExport(
+  entries: AuditEntry[],
+): AuditExportResult {
+  if (entries.length > AUDIT_EXPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      code: "ROW_CAP_EXCEEDED",
+      error: `Audit export exceeds maximum of ${AUDIT_EXPORT_MAX_ROWS} rows.`,
+    };
+  }
+
+  const ordered = [...entries].sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
+
+  const verification = verifyHashChain(ordered);
+  if (!verification.valid) {
+    return {
+      ok: false,
+      code: "CHAIN_INVALID",
+      error: verification.error ?? "Audit hash chain failed verification.",
+    };
+  }
+
+  return { ok: true, entries: ordered.map((entry) => redactAuditEntry(entry)) };
 }
 
 function applyFilter(
@@ -69,6 +142,13 @@ function applyFilter(
 }
 
 const storePath = getFortexaStorePath("audit.json");
+let fallbackMutationQueue = Promise.resolve();
+
+function withFallbackMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  const result = fallbackMutationQueue.then(operation, operation);
+  fallbackMutationQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 const baselineUsage: DailyUsage = {
   spentXLM: 0,
@@ -76,8 +156,15 @@ const baselineUsage: DailyUsage = {
   lastUpdated: new Date().toISOString(),
 };
 
-async function ensureStore() {
+/**
+ * Opens the audit file store, creating it if missing, and returns its path.
+ * The path comes only from resolveContainedStorePath, so a name that escapes
+ * the data directory (`..`, an absolute path, or a symlink pointing outside)
+ * throws StoragePathError before anything is read or written.
+ */
+export async function openAuditFileStore(fileName: string = AUDIT_STORE_FILE_NAME): Promise<ContainedStorePath> {
   await fs.mkdir(getFortexaStoreDir(), { recursive: true });
+  const storePath = await resolveContainedStorePath(fileName);
   try {
     await fs.access(storePath);
   } catch {
@@ -87,16 +174,30 @@ async function ensureStore() {
     };
     await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
   }
+  return storePath;
 }
 
 async function readStore(): Promise<AuditStoreFile> {
-  await ensureStore();
+  const storePath = await openAuditFileStore();
   const raw = await fs.readFile(storePath, "utf8");
   return JSON.parse(raw) as AuditStoreFile;
 }
 
 async function writeStore(store: AuditStoreFile) {
-  await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf8");
+  const tempPath = `${storePath}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");
+    await fs.rename(tempPath, storePath);
+  } catch (error) {
+    await fs.unlink(tempPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+function nextAuditTimestamp(timestamp: string, previousTimestamp?: string) {
+  const requested = Date.parse(timestamp);
+  const previous = previousTimestamp ? Date.parse(previousTimestamp) : Number.NEGATIVE_INFINITY;
+  return new Date(Math.max(requested, previous + 1)).toISOString();
 }
 
 export async function getAuditEntryById(userId: string, entryId: string) {
@@ -111,7 +212,7 @@ export async function listAuditEntries(userId: string, filter?: AuditFilter) {
         SELECT payload
         FROM fortexa_audit_entries
         WHERE user_id = $1
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, chain_sequence DESC
       `,
       [userId],
     );
@@ -144,7 +245,7 @@ export async function listAllAuditEntriesByUser(filter?: AuditFilter) {
         `
         SELECT user_id, payload
         FROM fortexa_audit_entries
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC, chain_sequence DESC
       `,
       );
 
@@ -186,55 +287,68 @@ export async function listAllAuditEntriesByUser(filter?: AuditFilter) {
 }
 
 export async function appendAuditEntry(userId: string, entry: AuditEntry) {
-  const db = await runWithDatabase("appendAuditEntry", async (pool) => {
-    const prevResult = await pool.query<{ entry_hash: string }>(
-      `
-        SELECT entry_hash
-        FROM fortexa_audit_entries
-        WHERE user_id = $1
-          AND entry_hash IS NOT NULL
-        ORDER BY timestamp DESC
-        LIMIT 1
-      `,
-      [userId],
-    );
+  const db = await runWithDatabaseStrict("appendAuditEntry", async (pool) => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [userId]);
 
-    const previousHash = prevResult.rows[0]?.entry_hash ?? GENESIS_HASH;
-    const entryHash = computeEntryHash({ ...entry, previousHash });
-    const enriched: AuditEntry = { ...entry, previousHash, entryHash };
+      const prevResult = await client.query<{ entry_hash: string; timestamp: string; chain_sequence: string }>(
+        `
+          SELECT entry_hash, timestamp, chain_sequence
+          FROM fortexa_audit_entries
+          WHERE user_id = $1
+            AND entry_hash IS NOT NULL
+          ORDER BY chain_sequence DESC
+          LIMIT 1
+        `,
+        [userId],
+      );
 
-    await pool.query(
-      `
-        INSERT INTO fortexa_audit_entries (id, user_id, timestamp, payload, entry_hash)
-        VALUES ($1, $2, $3::timestamptz, $4::jsonb, $5)
-      `,
-      [
-        enriched.id,
-        userId,
-        enriched.timestamp,
-        JSON.stringify(enriched),
-        enriched.entryHash,
-      ],
-    );
+      const previous = prevResult.rows[0];
+      const previousHash = previous?.entry_hash ?? GENESIS_HASH;
+      const timestamp = nextAuditTimestamp(entry.timestamp, previous?.timestamp);
+      const sequenceResult = await client.query<{ next_sequence: string }>(
+        `SELECT COALESCE(MAX(chain_sequence), 0) + 1 AS next_sequence FROM fortexa_audit_entries WHERE user_id = $1`,
+        [userId],
+      );
+      const sequence = Number(sequenceResult.rows[0]?.next_sequence ?? 1);
+      const entryHash = computeEntryHash({ ...entry, timestamp, previousHash });
+      const enriched: AuditEntry = { ...entry, timestamp, previousHash, entryHash };
+
+      await client.query(
+        `
+          INSERT INTO fortexa_audit_entries (id, user_id, timestamp, payload, entry_hash, chain_sequence)
+          VALUES ($1, $2, $3::timestamptz, $4::jsonb, $5, $6)
+        `,
+        [enriched.id, userId, enriched.timestamp, JSON.stringify(enriched), enriched.entryHash, sequence],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   if (db.available) {
     return;
   }
 
-  const store = await readStore();
-  const existing = store.auditByUser[userId] ?? [];
-  const sorted = [...existing].sort((a, b) =>
-    a.timestamp < b.timestamp ? -1 : 1,
-  );
-  const lastHashed = [...sorted].reverse().find((e) => e.entryHash);
-  const previousHash = lastHashed?.entryHash ?? GENESIS_HASH;
-  const entryHash = computeEntryHash({ ...entry, previousHash });
-  const enriched: AuditEntry = { ...entry, previousHash, entryHash };
+  await withFallbackMutationLock(async () => {
+    const store = await readStore();
+    const existing = store.auditByUser[userId] ?? [];
+    const lastHashed = [...existing].reverse().find((storedEntry) => storedEntry.entryHash);
+    const previousHash = lastHashed?.entryHash ?? GENESIS_HASH;
+    const timestamp = nextAuditTimestamp(entry.timestamp, existing.at(-1)?.timestamp);
+    const entryHash = computeEntryHash({ ...entry, timestamp, previousHash });
+    const enriched: AuditEntry = { ...entry, timestamp, previousHash, entryHash };
 
-  existing.push(enriched);
-  store.auditByUser[userId] = existing;
-  await writeStore(store);
+    existing.push(enriched);
+    store.auditByUser[userId] = existing;
+    await writeStore(store);
+  });
 }
 
 export async function getDailyUsage(userId: string) {
@@ -316,19 +430,21 @@ export async function consumeUsage(userId: string, amountXLM: number) {
     return;
   }
 
-  const store = await readStore();
-  const current = store.usageByUser[userId] ?? {
-    ...baselineUsage,
-    lastUpdated: new Date().toISOString(),
-  };
+  await withFallbackMutationLock(async () => {
+    const store = await readStore();
+    const current = store.usageByUser[userId] ?? {
+      ...baselineUsage,
+      lastUpdated: new Date().toISOString(),
+    };
 
-  store.usageByUser[userId] = {
-    spentXLM: current.spentXLM + amountXLM,
-    toolCalls: current.toolCalls + 1,
-    lastUpdated: new Date().toISOString(),
-  };
+    store.usageByUser[userId] = {
+      spentXLM: current.spentXLM + amountXLM,
+      toolCalls: current.toolCalls + 1,
+      lastUpdated: new Date().toISOString(),
+    };
 
-  await writeStore(store);
+    await writeStore(store);
+  });
 }
 
 export async function resetAuditState(userId: string) {
@@ -354,11 +470,13 @@ export async function resetAuditState(userId: string) {
     return;
   }
 
-  const store = await readStore();
-  store.auditByUser[userId] = [];
-  store.usageByUser[userId] = {
-    ...baselineUsage,
-    lastUpdated: new Date().toISOString(),
-  };
-  await writeStore(store);
+  await withFallbackMutationLock(async () => {
+    const store = await readStore();
+    store.auditByUser[userId] = [];
+    store.usageByUser[userId] = {
+      ...baselineUsage,
+      lastUpdated: new Date().toISOString(),
+    };
+    await writeStore(store);
+  });
 }

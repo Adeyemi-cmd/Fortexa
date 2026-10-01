@@ -6,6 +6,7 @@ import {
   getStellarHorizonUrl,
   inferStellarNetworkFromHorizonUrl,
 } from "@/lib/stellar/network";
+import { STORAGE_MIGRATIONS } from "@/lib/storage/migrations";
 
 const STELLAR_PUBLIC_KEY = /^G[A-Z2-7]{55}$/u;
 const MIN_AUTH_SECRET_LENGTH = 32;
@@ -23,6 +24,7 @@ export type ProductionReadinessReport = {
 
 type ProductionReadinessOptions = {
   cwd?: string;
+  appliedMigrationId?: string | null;
 };
 
 function normalizeConfiguredValue(value: string | undefined) {
@@ -82,6 +84,8 @@ function addIssue(
   issues.push({ setting, message, remediation });
 }
 
+type ReadinessEnv = Record<string, string | undefined>;
+
 export function checkProductionReadiness(
   env: Record<string, string | undefined> = process.env,
   options: ProductionReadinessOptions = {}
@@ -131,7 +135,10 @@ export function checkProductionReadiness(
 
   if (horizonUrl) {
     const inferredNetwork = inferStellarNetworkFromHorizonUrl(
-      getStellarHorizonUrl({ ...env, STELLAR_HORIZON_URL: horizonUrl })
+      getStellarHorizonUrl({
+        ...env,
+        STELLAR_HORIZON_URL: horizonUrl,
+      } as NodeJS.ProcessEnv)
     );
 
     if (inferredNetwork === "testnet") {
@@ -213,6 +220,29 @@ export function checkProductionReadiness(
     );
   }
 
+  const hasSecureSessionCookiePolicy = env.NODE_ENV === "production";
+
+  if (hasSecureSessionCookiePolicy && networkPassphrase === STELLAR_TESTNET_NETWORK_PASSPHRASE) {
+    addIssue(
+      issues,
+      "NODE_ENV, STELLAR_NETWORK_PASSPHRASE",
+      "Deployment requires a secure session cookie but is using a testnet passphrase.",
+      "Use the Stellar public network passphrase for production deployments."
+    );
+  }
+
+  if (hasSecureSessionCookiePolicy && options.appliedMigrationId !== undefined) {
+    const expectedMigrationId = STORAGE_MIGRATIONS[STORAGE_MIGRATIONS.length - 1]?.id;
+    if (expectedMigrationId && options.appliedMigrationId !== expectedMigrationId) {
+      addIssue(
+        issues,
+        "NODE_ENV, fortexa_schema_migrations",
+        "Deployment requires a secure session cookie but the applied migration is behind the current code.",
+        "Run the database migrations to bring the schema up to date."
+      );
+    }
+  }
+
   return {
     ok: issues.length === 0,
     issues,
@@ -251,4 +281,60 @@ export function formatProductionReadinessReport(
   }
 
   return lines.join("\n");
+}
+
+export type ServiceReadinessCheckName = "production_config" | "storage" | "horizon";
+
+export type ServiceReadinessCheck = {
+  name: ServiceReadinessCheckName;
+  ok: boolean;
+};
+
+export type ServiceReadiness = {
+  ready: boolean;
+  checks: ServiceReadinessCheck[];
+  failingChecks: ServiceReadinessCheckName[];
+};
+
+/**
+ * Whether the process can serve payment and policy actions. The health route
+ * computes this once and the dashboard only renders what the route returns,
+ * so both agree on one answer.
+ *
+ * - production_config: the same report the payment routes enforce, so the
+ *   dashboard hides actions exactly when build-payment and submit-signed
+ *   would answer 503.
+ * - storage: a configured database that does not answer. The file store
+ *   (no DATABASE_URL) has nothing to wait for.
+ * - horizon: a configured Horizon endpoint that does not answer.
+ */
+export function evaluateServiceReadiness(input: {
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+  databaseAvailable: boolean;
+  horizonStatus: string;
+}): ServiceReadiness {
+  const env = input.env ?? process.env;
+  const checks: ServiceReadinessCheck[] = [
+    {
+      name: "production_config",
+      ok: getProtectedPaymentFlowReadinessReport(env, { cwd: input.cwd }) === null,
+    },
+    {
+      name: "storage",
+      ok: !normalizeConfiguredValue(env.DATABASE_URL) || input.databaseAvailable,
+    },
+    {
+      name: "horizon",
+      ok: input.horizonStatus !== "degraded",
+    },
+  ];
+
+  const failingChecks = checks.filter((check) => !check.ok).map((check) => check.name);
+
+  return {
+    ready: failingChecks.length === 0,
+    checks,
+    failingChecks,
+  };
 }

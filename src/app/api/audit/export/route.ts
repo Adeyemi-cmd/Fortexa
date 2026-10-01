@@ -46,6 +46,24 @@ function chainFailureDetails(result: Extract<ChainVerificationResult, { valid: f
   };
 }
 
+function chainErrorResponse(
+  request: NextRequest,
+  startedAtMs: number,
+  error: AuditChainError,
+) {
+  const status = error.code === "audit_chain_row_cap_exceeded" ? 413 : 422;
+  return jsonWithRequestContext(request, {
+    route: "/api/audit/export",
+    startedAtMs,
+    status,
+    body: {
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    },
+  });
+}
+
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/audit/export");
@@ -136,7 +154,6 @@ export async function GET(request: NextRequest) {
               ]),
             ),
           },
-
         });
       }
 
@@ -164,7 +181,7 @@ export async function GET(request: NextRequest) {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=fortexa-audit-all.csv",
+          "Content-Disposition": `attachment; filename=${filenameAll}`,
           "x-request-id": request.headers.get("x-request-id") ?? crypto.randomUUID(),
         },
       });
@@ -195,7 +212,6 @@ export async function GET(request: NextRequest) {
           entries: redactAuditExportPayload(mine),
           chainBoundary: verified.boundaries,
         },
-
       });
     }
 
@@ -215,7 +231,7 @@ export async function GET(request: NextRequest) {
 
     logInfo("Audit export success (mine/csv)", { ...context, userId: auth.session.userId });
     const filenameMine = `fortexa-audit-mine-${new Date().toISOString().slice(0, 10)}.csv`;
-    return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
+    return new NextResponse(toCsv(rows), {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
