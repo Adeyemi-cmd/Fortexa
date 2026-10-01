@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
+import { canPassDecisionGate, evaluateDecision } from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -11,6 +11,7 @@ import {
   logWarn,
 } from "@/lib/observability/logger";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
+import { redactSensitiveFields } from "@/lib/observability/redact";
 import { demoScenarios } from "@/lib/scenarios/seed";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
@@ -18,11 +19,11 @@ import {
   consumeUsage,
   getDailyUsage,
 } from "@/lib/storage/audit-store";
+import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { getPolicyConfig } from "@/lib/storage/policy-store";
 import { buildPaymentQuoteFromDecision } from "@/lib/stellar/verify-payment-quote";
 import type { AuditEntry } from "@/lib/types/domain";
 import { decisionRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -46,7 +47,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["operator", "signer"] });
 
     if (!auth.ok) {
       logWarn("Decision route unauthorized", context);
@@ -54,19 +55,40 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
+    const assignedWallet = await getUserWallet(userId);
+    if (!assignedWallet || "expired" in assignedWallet) {
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 401,
+        body: { error: "No active wallet mapping found for this user." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (!(await canPassDecisionGate(userId))) {
+      logWarn("Decision route rejected revoked wallet", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 401,
+        body: { error: "Wallet access has been revoked." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
 
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
-      logValidationFailure("Decision route validation failed", { ...context, userId }, parsedBody.error, rawBody);
+      logWarn("Decision route validation failed", { ...context, userId });
       return jsonWithRequestContext(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
         body: {
           error: "Invalid decision request body.",
-          details: toPublicValidationDetails(parsedBody.error),
+          details: parsedBody.error.flatten(),
         },
         headers: rateLimitHeaders(rate),
       });
@@ -121,17 +143,18 @@ export async function POST(request: NextRequest) {
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
-      ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
-      (body.paymentQuote || body.paymentQuoteInput)
-        ? {
-            paymentQuote: buildPaymentQuoteFromDecision({
-              destination: (body.paymentQuote || body.paymentQuoteInput)!.destination,
-              amountXLM: action.amountXLM,
-              memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
-              actionId: action.id,
-              network: (body.paymentQuote || body.paymentQuoteInput)!.network,
-            }),
-          }
+      ...(finalDecision === "APPROVE" || finalDecision === "WARN"
+        ? body.paymentQuoteInput
+          ? {
+              paymentQuote: buildPaymentQuoteFromDecision({
+                destination: body.paymentQuoteInput.destination,
+                amountXLM: action.amountXLM,
+                memo: body.paymentQuoteInput.memo,
+                actionId: action.id,
+                network: body.paymentQuoteInput.network,
+              }),
+            }
+          : {}
         : {}),
     };
 
@@ -165,9 +188,15 @@ export async function POST(request: NextRequest) {
       headers: rateLimitHeaders(rate),
     });
   } catch (error) {
+    // #205: pass error detail through the shared observability redactor so
+    // destination addresses, memos, and secret-bearing values never reach logs.
+    // The API metric for this 500 response is still recorded by
+    // jsonWithRequestContext — redaction must not suppress it.
+    const redactedDetail =
+      error instanceof Error ? redactSensitiveFields(error.message) : "unknown";
     logError("Decision route internal error", {
       ...context,
-      detail: error instanceof Error ? error.message : "unknown",
+      detail: redactedDetail,
     });
     return jsonWithRequestContext(request, {
       route: "/api/decision",

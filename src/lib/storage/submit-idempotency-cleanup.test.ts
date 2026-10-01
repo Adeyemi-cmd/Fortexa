@@ -12,14 +12,16 @@ vi.hoisted(() => {
 
 import { getFortexaStorePath } from "@/lib/storage/paths";
 import {
+  beginIdempotentSubmit,
   cleanupOldIdempotencyRecords,
+  getIdempotencyRecord,
   getIdempotencyRetentionDays,
-  hashSignedXdr,
   resetSubmitIdempotencyState,
 } from "@/lib/storage/submit-idempotency-store";
 
 const TEST_USER = "cleanup-test-user";
 const storePath = getFortexaStorePath("submit-idempotency.json");
+const TEST_REQUEST_HASH = "a".repeat(64);
 
 function daysAgo(days: number): string {
   const d = new Date();
@@ -27,34 +29,50 @@ function daysAgo(days: number): string {
   return d.toISOString();
 }
 
-async function writeRecords(
-  records: Array<{ idempotencyKey: string; createdAt: string }>
-) {
+function msFromNow(ms: number): string {
+  return new Date(Date.now() + ms).toISOString();
+}
+
+type RecordInput = {
+  idempotencyKey: string;
+  createdAt: string;
+  state?: "in_flight" | "settled";
+  leaseExpiresAt?: string | null;
+};
+
+async function writeRecords(records: RecordInput[]) {
   const store: { records: Record<string, unknown> } = { records: {} };
   for (const r of records) {
     const key = `${TEST_USER}:${r.idempotencyKey}`;
     store.records[key] = {
       userId: TEST_USER,
       idempotencyKey: r.idempotencyKey,
-      xdrHash: hashSignedXdr("test-xdr"),
+      requestHash: TEST_REQUEST_HASH,
+      state: r.state ?? "settled",
+      leaseExpiresAt: r.leaseExpiresAt ?? null,
+      statusCode: 200,
+      transactionId: "c".repeat(64),
       result: { ok: true },
       createdAt: r.createdAt,
+      updatedAt: r.createdAt,
     };
   }
   await fs.mkdir(process.env.FORTEXA_STORE_DIR!, { recursive: true });
   await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf8");
 }
 
-async function readRecordCount(): Promise<number> {
+async function readRecordKeys(): Promise<string[]> {
   try {
     const raw = await fs.readFile(storePath, "utf8");
     const store = JSON.parse(raw);
-    return Object.keys(store.records).filter((k) =>
-      k.startsWith(`${TEST_USER}:`)
-    ).length;
+    return Object.keys(store.records).filter((k) => k.startsWith(`${TEST_USER}:`));
   } catch {
-    return 0;
+    return [];
   }
+}
+
+async function readRecordCount(): Promise<number> {
+  return (await readRecordKeys()).length;
 }
 
 beforeAll(async () => {
@@ -157,5 +175,55 @@ describe("cleanupOldIdempotencyRecords (file store)", () => {
     const deleted = await cleanupOldIdempotencyRecords(10);
     expect(deleted).toBe(1);
     expect(await readRecordCount()).toBe(1);
+  });
+});
+
+describe("cleanupOldIdempotencyRecords (in-flight protection)", () => {
+  beforeEach(async () => {
+    await resetSubmitIdempotencyState(TEST_USER);
+  });
+
+  it("does not delete a record that is still in flight, however old it is", async () => {
+    await writeRecords([
+      {
+        idempotencyKey: "in-flight-key",
+        createdAt: daysAgo(30),
+        state: "in_flight",
+        leaseExpiresAt: msFromNow(30_000),
+      },
+      { idempotencyKey: "settled-old-key", createdAt: daysAgo(30) },
+    ]);
+
+    const deleted = await cleanupOldIdempotencyRecords(7);
+    expect(deleted).toBe(1);
+    expect(await readRecordKeys()).toEqual([`${TEST_USER}:in-flight-key`]);
+  });
+
+  it("deletes an in-flight record whose claim lease has expired", async () => {
+    await writeRecords([
+      {
+        idempotencyKey: "stuck-in-flight-key",
+        createdAt: daysAgo(30),
+        state: "in_flight",
+        leaseExpiresAt: msFromNow(-1_000),
+      },
+    ]);
+
+    const deleted = await cleanupOldIdempotencyRecords(7);
+    expect(deleted).toBe(1);
+    expect(await readRecordCount()).toBe(0);
+  });
+
+  it("keeps a freshly claimed in-flight record during a normal cleanup run", async () => {
+    const claim = await beginIdempotentSubmit(TEST_USER, "live-claim-key", TEST_REQUEST_HASH, {
+      inFlightWaitMs: 0,
+    });
+    expect(claim.outcome).toBe("claimed");
+
+    const deleted = await cleanupOldIdempotencyRecords(7);
+    expect(deleted).toBe(0);
+
+    const stored = await getIdempotencyRecord(TEST_USER, "live-claim-key");
+    expect(stored?.state).toBe("in_flight");
   });
 });

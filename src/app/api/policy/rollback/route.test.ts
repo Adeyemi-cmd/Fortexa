@@ -21,6 +21,18 @@ function operatorCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
+function signerCookie() {
+  process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: "policy-rollback-signer",
+    expiresInSeconds: 120,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
 describe("/api/policy/rollback route", () => {
   it("returns 401 when unauthenticated", async () => {
     const request = new NextRequest("http://localhost/api/policy/rollback", {

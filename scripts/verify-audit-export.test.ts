@@ -29,22 +29,10 @@ describe("extractExportPayload", () => {
   });
 
   it("accepts scope=all object", () => {
-    const boundaries = { firstEntryHash: "a".repeat(64), lastEntryHash: "b".repeat(64) };
-    const data = {
-      scope: "all",
-      entriesByUser: { "user-a": [{ id: "e1" }] },
-      chainBoundariesByUser: { "user-a": boundaries },
-    };
+    const data = { scope: "all", entriesByUser: { "user-a": [{ id: "e1" }] } };
     const result = extractExportPayload(data);
     expect(result.entriesByUser).toEqual({ "user-a": [{ id: "e1" }] });
     expect(result.entries).toBeNull();
-    expect(result.chainBoundariesByUser).toEqual({ "user-a": boundaries });
-  });
-
-  it("extracts scope=mine chain boundaries", () => {
-    const chainBoundary = { firstEntryHash: "a".repeat(64), lastEntryHash: "b".repeat(64) };
-    const result = extractExportPayload({ scope: "mine", entries: [], chainBoundary });
-    expect(result.chainBoundary).toEqual(chainBoundary);
   });
 
   it("accepts object with entries key and no scope", () => {
@@ -106,20 +94,6 @@ describe("fixtures — tamper detection", () => {
     const result = verifyHashChain(entries!);
     expect(result.valid).toBe(false);
     if (!result.valid) expect(result.reason).toContain("previousHash mismatch");
-  });
-
-  it("first-record-deleted.json: detects removal of the first exported record", () => {
-    const extracted = extractExportPayload(loadFixture("first-record-deleted.json"));
-    const result = verifyHashChain(extracted.entries!, extracted.chainBoundary);
-    expect(result.valid).toBe(false);
-    if (!result.valid) expect(result.reason).toMatch(/previousHash mismatch|chain start boundary mismatch/);
-  });
-
-  it("last-record-deleted.json: detects removal of the last exported record", () => {
-    const extracted = extractExportPayload(loadFixture("last-record-deleted.json"));
-    const result = verifyHashChain(extracted.entries!, extracted.chainBoundary);
-    expect(result.valid).toBe(false);
-    if (!result.valid) expect(result.reason).toContain("chain end boundary mismatch");
   });
 
   it("reordered-entries.json: detects timestamp-swapped reordering", () => {

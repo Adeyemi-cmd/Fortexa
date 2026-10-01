@@ -34,7 +34,7 @@ All series are labeled by `route` (Next.js route path, e.g. `/api/decision`) and
 | `fortexa_request_errors_total` | counter | Requests that returned HTTP >= 400 |
 | `fortexa_request_duration_ms_p95` | gauge | Rolling p95 latency in milliseconds (last 500 samples per bucket) |
 | `fortexa_decision_outcomes_total` | counter | Decision evaluations labelled by `outcome` (APPROVE \| WARN \| REQUIRE_APPROVAL \| BLOCK) |
-| `fortexa_stellar_submit_results_total` | counter | Stellar submission attempts labelled by `result` (success \| horizon_failure \| validation_failure \| idempotency_replay \| idempotency_conflict) |
+| `fortexa_stellar_submit_results_total` | counter | Stellar submission attempts labelled by `result` (success \| horizon_failure \| validation_failure \| idempotency_replay \| idempotency_conflict \| idempotency_in_flight) |
 
 Sample output:
 
@@ -226,6 +226,27 @@ For operators who don't want to wire up Prometheus, the `/ops` page renders the 
 - **No histogram.** p95 is a gauge derived from a 500-sample ring buffer, not a true Prometheus histogram. Don't use it for cross-instance percentile aggregation.
 - **Local vs deployed auth.** Locally, no allowlist means any pubkey works. In production, set `FORTEXA_OPERATOR_WALLETS` to restrict.
 
+
+---
+
+## Reporting API Failures
+
+Every API response includes an `x-request-id` header whose value is a UUID v4. The same identifier appears in structured logs as the `requestId` field.
+
+When reporting a failure, include the `x-request-id` value so operators can correlate the issue with server-side logs. A complete report should contain:
+
+- **`x-request-id`** — the UUID from the response header or `requestId` from the log line
+- **Route and method** — e.g. `POST /api/decision`
+- **HTTP status code** — e.g. `500`, `403`
+- **Timestamp** — the `ts` field from the log line, or the wall-clock time of the failure
+
+Example log line:
+
+```json
+{"ts":"2026-06-29T12:34:56.789Z","level":"error","message":"Horizon submission failed","requestId":"a1b2c3d4-...","route":"/api/stellar/submit-signed","method":"POST","statusCode":502}
+```
+
+If an upstream proxy or load balancer already set an `x-request-id` header on the incoming request, that value is forwarded in both the response and the logs. Otherwise the server generates one automatically.
 
 ---
 

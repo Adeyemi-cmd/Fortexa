@@ -112,7 +112,7 @@ export async function POST(request: NextRequest) {
     return jsonWithRequestContext(request, {
       route: "/api/policy/rollback",
       startedAtMs,
-      status: 500,
+      status: error instanceof Error && error.message.includes("not found") ? 404 : 500,
       body: { error: error instanceof Error ? error.message : "Failed to rollback policy." },
     });
   }
