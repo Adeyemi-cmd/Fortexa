@@ -31,6 +31,18 @@ function viewerCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
+function signerCookie() {
+  process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: "signer-user-id",
+    expiresInSeconds: 120,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
 function makePolicyGetRequest(cookie: string) {
   return new NextRequest("http://localhost/api/policy", {
     method: "GET",
@@ -156,6 +168,11 @@ describe("/api/policy route", () => {
     });
     const response = await POST(request);
 
+    expect(response.status).toBe(403);
+  });
+
+  it("returns 403 for signer-only policy updates", async () => {
+    const response = await POST(makePolicyPostRequest(signerCookie(), POLICY_PAYLOAD));
     expect(response.status).toBe(403);
   });
 
@@ -324,5 +341,57 @@ describe("/api/policy route", () => {
 
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toBe("Invalid policy payload.");
+  });
+
+  it("rejects a direct write of a schema-invalid document with API field errors", async () => {
+    const cookie = operatorCookie();
+
+    const response = await POST(
+      makePolicyPostRequest(cookie, {
+        ...POLICY_PAYLOAD,
+        perTxCapXLM: -100,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as {
+      error: string;
+      details?: { fieldErrors?: Record<string, string[]> };
+    };
+    expect(payload.error).toBe("Invalid policy payload.");
+    expect(payload.details?.fieldErrors?.perTxCapXLM?.length ?? 0).toBeGreaterThan(0);
+  });
+
+  it("rejects a direct write containing duplicate rule identifiers with 422", async () => {
+    const cookie = operatorCookie();
+
+    const response = await POST(
+      makePolicyPostRequest(cookie, {
+        ...POLICY_PAYLOAD,
+        allowedDomains: ["dup.example.com", "dup.example.com"],
+      }),
+    );
+
+    expect(response.status).toBe(422);
+    const payload = (await response.json()) as { code?: string; error?: string };
+    expect(payload.code).toBe("DUPLICATE_RULE_IDENTIFIER");
+    expect(payload.error).toContain("dup.example.com");
+  });
+
+  it("does not advance the policy version after a rejected direct write", async () => {
+    const cookie = operatorCookie();
+
+    const seed = await POST(makePolicyPostRequest(cookie, POLICY_PAYLOAD));
+    expect(seed.status).toBe(200);
+    const seedBody = (await seed.json()) as { version: number };
+
+    const rejected = await POST(
+      makePolicyPostRequest(cookie, { ...POLICY_PAYLOAD, riskThreshold: 0 }),
+    );
+    expect(rejected.status).toBe(400);
+
+    const verify = await GET(makePolicyGetRequest(cookie));
+    const verifyBody = (await verify.json()) as { version: number };
+    expect(verifyBody.version).toBe(seedBody.version);
   });
 });

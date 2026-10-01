@@ -5,7 +5,9 @@ import { parseStoredPolicy } from "@/lib/policy/migrations";
 
 import currentValid from "./__fixtures__/policy-current-valid.json";
 import malformedWrongTypes from "./__fixtures__/policy-malformed-types.json";
+import midMigrationFailure from "./__fixtures__/policy-mid-migration-failure.json";
 import olderMissingHours from "./__fixtures__/policy-older-missing-allowed-hours.json";
+import unknownVersion from "./__fixtures__/policy-unknown-version.json";
 
 describe("parseStoredPolicy smoke tests", () => {
   it("loads the current valid fixture without any migration", () => {
@@ -17,6 +19,7 @@ describe("parseStoredPolicy smoke tests", () => {
     }
 
     expect(result.migrations).toEqual([]);
+    expect(result.version).toBe(currentValid.schemaVersion);
     expect(result.policy.allowedHours).toEqual(defaultPolicyConfig.allowedHours);
     expect(result.policy.perTxCapXLM).toBe(120);
     expect(result.policy.allowedTools).toContain("research-pro");
@@ -157,5 +160,50 @@ describe("parseStoredPolicy smoke tests", () => {
 
     expect(result.error.toLowerCase()).toContain("malformed");
     expect(result.issues.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an unknown schema version without attempting migration", () => {
+    const result = parseStoredPolicy(unknownVersion);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected unknown version to be rejected");
+    }
+
+    expect(result.error.toLowerCase()).toContain("unknown policy schema version");
+    expect(result.version).toBe(unknownVersion.schemaVersion);
+  });
+
+  it("rejects a document that fails mid-migration and reports the failing version", () => {
+    const result = parseStoredPolicy(midMigrationFailure);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error("expected mid-migration failure to be rejected");
+    }
+
+    expect(result.version).toBe(midMigrationFailure.schemaVersion);
+    expect(result.issues.length).toBeGreaterThan(0);
+  });
+
+  it("rejects a document whose migration silently changes a rule type", () => {
+    // allowedHours is missing and would be filled by the optional default,
+    // but the raw document carries an array for allowedHours that the
+    // schema would coerce to a different shape. The guard must reject it
+    // rather than accept a silent type flip.
+    const result = parseStoredPolicy({
+      schemaVersion: 1,
+      allowedDomains: ["api.safe-research.ai"],
+      blockedDomains: ["wallet-drainer.evil"],
+      allowedTools: ["research-pro"],
+      blockedTools: ["shadow-shell"],
+      perTxCapXLM: 50,
+      dailyCapXLM: 200,
+      maxToolCallsPerDay: 5,
+      riskThreshold: 60,
+      allowedHours: [6, 23],
+    });
+
+    expect(result.ok).toBe(false);
   });
 });

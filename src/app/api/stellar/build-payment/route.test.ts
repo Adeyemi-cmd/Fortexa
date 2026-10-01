@@ -67,12 +67,23 @@ function operatorCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
-function jsonRequest(url: string, body: unknown) {
+function signerCookie() {
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: OPERATOR_USER_ID,
+    expiresInSeconds: 300,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
+function jsonRequest(url: string, body: unknown, cookie = signerCookie()) {
   return new NextRequest(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie: operatorCookie(),
+      cookie,
     },
     body: JSON.stringify(body),
   });
@@ -150,6 +161,16 @@ beforeEach(async () => {
 });
 
 describe("POST /api/stellar/build-payment quote verification", () => {
+  it("rejects operator-only wallets", async () => {
+    const response = await buildPaymentPost(jsonRequest(
+      "http://localhost/api/stellar/build-payment",
+      authorizedBuildBody(),
+      operatorCookie(),
+    ));
+
+    expect(response.status).toBe(403);
+  });
+
   it.each(["0", "-1", "NaN", "Infinity", "9007199254740992", "10.12345678"] as const)(
     "rejects invalid amount %s before XDR construction",
     async (amount) => {

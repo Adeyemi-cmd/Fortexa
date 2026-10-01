@@ -9,9 +9,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { useAuthSession } from "@/lib/auth/use-auth-session";
 import type { SimulationReport, SimulationSource } from "@/lib/decision/simulate";
+import {
+  applyValidateResponse,
+  buildValidationDisplayErrors,
+  canActivateDraft,
+  draftIsBlockedByFailedValidation,
+  serializePolicyDraft,
+  INITIAL_POLICY_VALIDATION_GATE,
+  type PolicyFieldErrors,
+  type PolicyValidationGate,
+} from "@/lib/policy/activation";
 import type { DecisionType, PolicyConfig } from "@/lib/types/domain";
 import { hasSensitiveField } from "@/lib/settings/save-safety";
 import { PolicyImportExport } from "@/components/policy-import-export";
+import type { PolicyExport } from "@/lib/policy/import-export";
 
 type PolicyResponse = {
   policy?: PolicyConfig;
@@ -120,6 +131,13 @@ export function PolicyEditor({
     };
   }
 
+  /** Serialized current draft — binds any validation result to the exact document it checked. */
+  const currentDraftKey = policy ? serializePolicyDraft(buildDraftPolicy(policy)) : null;
+  /** Activate must stay disabled while validation failed for this exact draft. */
+  const activateBlocked = draftIsBlockedByFailedValidation(validationGate, currentDraftKey);
+  /** Activation is only possible after the validate route accepted this exact draft. */
+  const activateUnlocked = canActivateDraft(validationGate, currentDraftKey);
+
   const loadPolicy = useCallback(async () => {
     setLoading(true);
     try {
@@ -139,6 +157,7 @@ export function PolicyEditor({
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
       setConflict(null);
+      setValidationGate(INITIAL_POLICY_VALIDATION_GATE);
       setStatus("Policy loaded.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected policy load error.");
@@ -181,6 +200,7 @@ export function PolicyEditor({
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
       setConflict(null);
+      setValidationGate(INITIAL_POLICY_VALIDATION_GATE);
       setStatus("Reloaded latest policy from server. Local edits discarded — please re-enter your changes.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected reload error.");
@@ -204,10 +224,14 @@ export function PolicyEditor({
       return;
     }
 
+  /**
+   * POST the given document to /api/policy and apply the response.
+   * Shared by the gated activation flow and the import flow.
+   */
+  async function postPolicyUpdate(nextPolicy: PolicyConfig, successStatus: string): Promise<boolean> {
     setLoading(true);
     setConflict(null);
     try {
-      const nextPolicy = buildDraftPolicy(policy);
       // Send the version we loaded against so the server can detect another
       // operator's concurrent save. Missing it keeps the legacy behavior.
       const body = JSON.stringify({
@@ -249,26 +273,98 @@ export function PolicyEditor({
         );
         // Refresh history view in case the other operator's save landed.
         void loadHistory();
-        return;
+        return false;
       }
 
       const payload = (await response.json()) as PolicyResponse;
 
       if (!response.ok || payload.error || !payload.policy) {
+        // Surface the API's field errors verbatim when it rejects the document.
+        if (payload.details?.fieldErrors) {
+          setValidationGate({
+            status: "invalid",
+            draftKey: null,
+            errors: [],
+            fieldErrors: payload.details.fieldErrors,
+          });
+        }
         setStatus(payload.error ?? "Failed to save policy.");
-        return;
+        return false;
       }
 
       setPolicy(payload.policy);
+      setAllowedDomains(listToText(payload.policy.allowedDomains));
+      setBlockedDomains(listToText(payload.policy.blockedDomains));
+      setAllowedTools(listToText(payload.policy.allowedTools));
+      setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
-      setStatus("Policy updated successfully.");
+      setStatus(successStatus);
+      resetActivationGate();
       await loadHistory();
+      return true;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected policy save error.");
+      return false;
     } finally {
       setLoading(false);
     }
+  }
+
+  /**
+   * Submit the unsaved draft to the validate route. The result is bound to
+   * the serialized draft, so editing any field re-requires validation.
+   * API errors are stored exactly as returned — never rewritten.
+   */
+  async function validateDraft(): Promise<boolean> {
+    if (!policy) {
+      setStatus("Policy is not loaded yet.");
+      return false;
+    }
+
+    const draftKey = serializePolicyDraft(buildDraftPolicy(policy));
+    setValidationGate({ ...INITIAL_POLICY_VALIDATION_GATE, status: "validating", draftKey });
+    try {
+      const response = await fetch("/api/policy/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ policy: buildDraftPolicy(policy) }),
+      });
+      const payload = (await response.json().catch(() => ({}))) as unknown;
+      const gate = applyValidateResponse(draftKey, response.ok, payload);
+      setValidationGate(gate);
+      return gate.status === "valid";
+    } catch (error) {
+      const gate = applyValidateResponse(draftKey, false, {
+        errors: [error instanceof Error ? error.message : "Unexpected validation error."],
+      });
+      setValidationGate(gate);
+      return false;
+    }
+  }
+
+  /**
+   * Activation is hard-gated: the draft is submitted to the validate route
+   * first, and only an accepted document is POSTed to /api/policy.
+   */
+  async function handleActivate() {
+    if (!isOperator) {
+      setStatus("Viewer role is read-only. Login as operator to activate policy.");
+      return;
+    }
+
+    if (!policy) {
+      setStatus("Policy is not loaded yet.");
+      return;
+    }
+
+    const validated = await validateDraft();
+    if (!validated) {
+      setStatus("Activation blocked: the validate route rejected this draft. Fix the listed errors and validate again.");
+      return;
+    }
+
+    await postPolicyUpdate(buildDraftPolicy(policy), "Policy activated successfully.");
   }
 
   async function runSimulation() {
@@ -427,6 +523,7 @@ export function PolicyEditor({
       setRollbackPreview(null);
       setRollbackPreviewVersion(null);
       setRollbackPreviewStatus(null);
+      resetActivationGate();
       setStatus(`Rollback successful to version ${versionToRollback}.`);
       await loadHistory();
     } catch (error) {
@@ -442,8 +539,7 @@ export function PolicyEditor({
       return;
     }
     if (!isOperator) {
-      setStatus("Viewer role is read-only. Login as operator to import policy.");
-      return;
+      throw new Error("Viewer role is read-only. Login as operator to import policy.");
     }
 
     setLoading(true);
@@ -462,8 +558,7 @@ export function PolicyEditor({
       if (payload.code === "NETWORK_MISMATCH") setServerNetworkMatches(false);
 
       if (!response.ok || payload.error || !payload.policy) {
-        setStatus(payload.error ?? "Failed to save imported policy.");
-        return;
+        throw new Error(payload.error ?? "Failed to save imported policy.");
       }
 
       setPolicy(payload.policy);
@@ -473,10 +568,11 @@ export function PolicyEditor({
       setBlockedTools(listToText(payload.policy.blockedTools));
       setUpdatedAt(payload.updatedAt ?? null);
       setVersion(payload.version ?? null);
-      setStatus("Policy imported and saved successfully.");
+      setStatus("Policy imported successfully.");
       await loadHistory();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Unexpected import error.");
+      throw error;
     } finally {
       setLoading(false);
     }
@@ -501,7 +597,6 @@ export function PolicyEditor({
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
     void loadPolicy();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadHistory();
   }, [loadPolicy, loadHistory]);
 
@@ -638,6 +733,7 @@ export function PolicyEditor({
 
         <PolicyImportExport
           currentPolicy={policy}
+          currentVersion={version}
           onImportApproved={handleImportPolicy}
           isOperator={isOperator}
           isLoading={saveDisabled}
@@ -806,6 +902,32 @@ export function PolicyEditor({
         <Button variant="outline" onClick={loadPolicy} disabled={loading}>Reload</Button>
         <Button variant="outline" onClick={loadHistory} disabled={loading}>Reload History</Button>
       </div>
+
+      {validationGate.status === "valid" ? (
+        <Alert className="border-emerald-500/40 bg-emerald-500/10" data-testid="policy-validation-status">
+          <AlertTitle>Draft validated</AlertTitle>
+          <AlertDescription>
+            The validate route accepted this exact document. Activation is unlocked until you edit the draft.
+          </AlertDescription>
+        </Alert>
+      ) : validationGate.status === "invalid" ? (
+        <Alert className="border-red-500/40 bg-red-500/10" data-testid="policy-validation-status">
+          <AlertTitle>Validation failed — activation is disabled</AlertTitle>
+          <AlertDescription>
+            <p>
+              The validate route rejected this draft. The errors below are returned by the API and shown
+              unmodified.
+            </p>
+            <ul className="mt-2 list-disc space-y-1 pl-4">
+              {buildValidationDisplayErrors(validationGate).map((error) => (
+                <li key={error} className="break-words font-mono text-xs">
+                  {error}
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      ) : null}
 
       {conflict ? (
         <Alert className="border-red-500/40 bg-red-500/10">
