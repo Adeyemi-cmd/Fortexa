@@ -2,11 +2,14 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-vi.mock("@/lib/storage/paths", () => {
+vi.mock("@/lib/storage/paths", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/storage/paths")>("@/lib/storage/paths");
   const dir = `/tmp/fortexa-simulate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return {
+    ...actual,
     getFortexaStoreDir: () => dir,
     getFortexaStorePath: (fileName: string) => path.join(dir, fileName),
+    resolveContainedStorePath: (fileName: string) => actual.resolveContainedStorePath(fileName, dir),
   };
 });
 

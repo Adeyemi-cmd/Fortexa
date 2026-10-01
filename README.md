@@ -107,6 +107,22 @@ Challenge TTL: `FORTEXA_AUTH_CHALLENGE_TTL_SECONDS` (default `300`).
 - Rate limiting
 - Brute-force lockout (`FORTEXA_AUTH_MAX_ATTEMPTS`, `FORTEXA_AUTH_LOCK_MINUTES`)
 
+### 4.4 Shared Enforcement Gate (decision / build / submit)
+
+`POST /api/decision`, `POST /api/stellar/build-payment`, and `POST /api/stellar/submit-signed` share one enforcement gate (`src/lib/security/enforcement-gate.ts`) that runs before any side effect:
+
+1. **Rate limit** — the caller's per-route budget is consumed atomically through the shared security state (Redis `EVAL` when `REDIS_URL` is set, file-backed otherwise), so parallel requests cannot both pass the last allowed slot.
+2. **Blocklist** — the payment destination (and, on decision, the action domain) is checked against the `FORTEXA_BLOCKLIST_URL` feed. A destination blocked on one route is blocked on all three.
+
+Denied requests return a stable machine-readable `code` alongside the usual rate-limit headers:
+
+| Condition | HTTP | `code` |
+|---|---|---|
+| Destination or domain on the blocklist | `403` | `BLOCKLISTED` |
+| Route rate budget exhausted | `429` | `RATE_LIMITED` |
+
+Destination and domain values never appear in metrics labels.
+
 > Note: MFA is removed from current implementation.
 
 ---
@@ -506,7 +522,7 @@ or `signedXdr` strings.
 
 ## 13) 📈 Ops / Observability (Appendix)
 
-- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`
+- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`, plus `ready`, `checks`, and `failingChecks` (`production_config`, `storage`, `horizon`). The dashboard shows its pay, fund, and policy actions only while `ready` is `true`.
 - Metrics endpoint: `GET /api/metrics` + Prometheus format
 - `/ops` dashboard shows:
   - service health
@@ -538,7 +554,7 @@ Otherwise Fortexa falls back to local JSON files:
 - Vercel default: `/tmp/fortexa/*.json`
 
 Optional overrides:
-- `FORTEXA_STORE_DIR` to set file-store directory explicitly
+- `FORTEXA_STORE_DIR` to set file-store directory explicitly (the audit file store only opens paths that resolve inside this directory; `..`, absolute paths outside it, and symlinks leading out of it are refused with a `StoragePathError`)
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
   - use an absolute path on Vercel (example: `/tmp/fortexa/shared-security-state.json`)
 - `REDIS_URL` for multi-instance deployments (e.g. Vercel)
@@ -626,3 +642,4 @@ Common Stellar Horizon failures during the signed payment flow:
 MIT (see `package.json`).
 
 All done
+...

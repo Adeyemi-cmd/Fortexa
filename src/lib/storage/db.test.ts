@@ -17,6 +17,7 @@ const { queryMock, endMock, releaseMock, poolCtorMock } = vi.hoisted(() => {
     endMock: end,
     releaseMock: release,
     poolCtorMock: ctor,
+    releaseMock: release,
   };
 });
 
