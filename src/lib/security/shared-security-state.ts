@@ -19,16 +19,23 @@ export type SharedChallengeState = {
   consumed: boolean;
 };
 
+export type SharedSessionRevocationState = {
+  revokedAtMs: number;
+  expiresAtMs: number;
+};
+
 type SharedSecurityState = {
   rateLimits: Record<string, SharedRateLimitState>;
   lockouts: Record<string, SharedLockoutState>;
   challenges: Record<string, SharedChallengeState>;
+  revokedSessions: Record<string, SharedSessionRevocationState>;
 };
 
 const defaultState: SharedSecurityState = {
   rateLimits: {},
   lockouts: {},
   challenges: {},
+  revokedSessions: {},
 };
 
 let redisClient: Redis | null = null;
@@ -113,6 +120,7 @@ function readSharedState(): SharedSecurityState {
       rateLimits: parsed.rateLimits ?? {},
       lockouts: parsed.lockouts ?? {},
       challenges: parsed.challenges ?? {},
+      revokedSessions: parsed.revokedSessions ?? {},
     };
   } catch {
     return defaultState;
@@ -347,6 +355,62 @@ export async function clearSharedChallenges(): Promise<void> {
     () => {
       const current = readSharedState();
       current.challenges = {};
+      writeSharedState(current);
+    }
+  );
+}
+
+export async function readSharedSessionRevocation(
+  sessionId: string
+): Promise<SharedSessionRevocationState | undefined> {
+  return runWithRedisFallback(
+    async (client) => {
+      const raw = await client.get(`fortexa:session-revoked:${sessionId}`);
+      if (!raw) {
+        return undefined;
+      }
+      return JSON.parse(raw) as SharedSessionRevocationState;
+    },
+    () => readSharedState().revokedSessions[sessionId]
+  );
+}
+
+export async function writeSharedSessionRevocation(
+  sessionId: string,
+  value: SharedSessionRevocationState
+): Promise<void> {
+  await runWithRedisFallback(
+    async (client) => {
+      const ttlSeconds = Math.max(1, Math.ceil((value.expiresAtMs - Date.now()) / 1000));
+      await client.set(`fortexa:session-revoked:${sessionId}`, JSON.stringify(value), "EX", ttlSeconds);
+    },
+    () => {
+      const current = readSharedState();
+      const now = Date.now();
+      // The file store has no TTL, so drop revocations that can no longer
+      // match a live token while writing a new one.
+      for (const [key, entry] of Object.entries(current.revokedSessions)) {
+        if (entry.expiresAtMs <= now) {
+          delete current.revokedSessions[key];
+        }
+      }
+      current.revokedSessions[sessionId] = value;
+      writeSharedState(current);
+    }
+  );
+}
+
+export async function clearSharedSessionRevocations(): Promise<void> {
+  await runWithRedisFallback(
+    async (client) => {
+      const keys = await client.keys("fortexa:session-revoked:*");
+      if (keys.length > 0) {
+        await client.del(keys);
+      }
+    },
+    () => {
+      const current = readSharedState();
+      current.revokedSessions = {};
       writeSharedState(current);
     }
   );

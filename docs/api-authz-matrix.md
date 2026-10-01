@@ -23,15 +23,15 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticat
 |--------|-------|-------------|-----------------|--------|----------------|-------|
 | GET | `/api/auth/challenge` | Public | 200 (challenge issued) | 200 | No | Issues a SEP-53 wallet challenge; rate-limited |
 | POST | `/api/auth/login` | Public | 200 (sets session cookie) | 200 | Yes | Verifies wallet signature; sets `fortexa_session` cookie |
-| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Clears the session cookie; no auth check |
-| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid session; extends token TTL |
-| GET | `/api/auth/session` | Public | 200 (no session body) | 200 | No | Returns session metadata if cookie is valid; safe to call unauthenticated |
+| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Revokes the presented session id server-side (every token generation of that login) and clears the cookie; no auth check |
+| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid, non-revoked session; extends token TTL and keeps the session id |
+| GET | `/api/auth/session` | Public | 200 (no session body) | 200 | No | Returns session metadata if the cookie verifies and its session id is not revoked; safe to call unauthenticated |
 
 ### Health & Metrics Routes
 
 | Method | Route | Access Level | Unauthenticated | Viewer | State-Changing | Notes |
 |--------|-------|-------------|-----------------|--------|----------------|-------|
-| GET | `/api/health` | Public | 200 | 200 | No | Returns service health and env flags; no auth required |
+| GET | `/api/health` | Public | 200 | 200 | No | Returns service health, env flags, and the `ready`/`failingChecks` readiness verdict the dashboard gates actions on; no auth required |
 | GET | `/api/metrics` | operator only | 401 | 403 | No | Returns Prometheus or JSON metrics snapshot |
 
 ### Audit Routes

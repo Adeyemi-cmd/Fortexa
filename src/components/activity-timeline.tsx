@@ -1,100 +1,149 @@
-import { DecisionBadge } from "@/components/decision-badge";
-import { Card, CardContent } from "@/components/ui/card";
-import { Clock4, Fingerprint, ScrollText } from "lucide-react";
-import { truncateMiddle } from "@/lib/utils/format";
+'use client';
 
-import type { AuditEntry } from "@/lib/types/domain";
+import { useState, useEffect } from 'react';
+import { verifyHashChain } from '@/lib/audit/hash-chain';
+import { redactSecrets } from '@/lib/audit/redact';
 
-export function ActivityTimeline({
-  entries,
-  compact = false,
-}: {
-  entries: AuditEntry[];
-  compact?: boolean;
-}) {
-  if (entries.length === 0) {
-    return (
-      <Card>
-        <CardContent className="py-10 text-center text-sm text-[hsl(var(--muted-foreground))]">
-          No audit entries yet. Run an evaluation in the Console to populate this timeline.
-        </CardContent>
-      </Card>
-    );
-  }
+interface AuditRow {
+  id: string;
+  timestamp: string;
+  action: string;
+  details: Record<string, unknown>;
+  hash: string;
+  previousHash: string;
+}
 
-  const visible = compact ? entries.slice(0, 5) : entries;
+interface AuditPage {
+  rows: AuditRow[];
+  nextPage: number | null;
+}
+
+interface ActivityTimelineProps {
+  initialPages: AuditPage[];
+}
+
+export function ActivityTimeline({ initialPages }: ActivityTimelineProps) {
+  const [pages, setPages] = useState<AuditPage[]>(initialPages);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasBrokenChain, setHasBrokenChain] = useState(false);
+  const [visibleRows, setVisibleRows] = useState<AuditRow[]>([]);
+
+  useEffect(() => {
+    processPages(initialPages);
+  }, []);
+
+  const processPages = (newPages: AuditPage[]) => {
+    const allRows: AuditRow[] = [];
+    let chainBroken = false;
+
+    for (const page of newPages) {
+      if (chainBroken) break;
+
+      const processedRows: AuditRow[] = [];
+      for (const row of page.rows) {
+        if (chainBroken) break;
+
+        // Verify hash chain integrity
+        if (allRows.length > 0) {
+          const lastRow = allRows[allRows.length - 1];
+          if (row.previousHash !== lastRow.hash) {
+            chainBroken = true;
+            setHasBrokenChain(true);
+            break;
+          }
+        }
+
+        // Redact secrets before adding to visible rows
+        const redactedRow = redactSecrets(row);
+        processedRows.push(redactedRow);
+      }
+
+      if (!chainBroken) {
+        allRows.push(...processedRows);
+      }
+    }
+
+    setVisibleRows(allRows);
+  };
+
+  const loadNextPage = async () => {
+    if (isLoading || hasBrokenChain) return;
+
+    const lastPage = pages[pages.length - 1];
+    if (!lastPage.nextPage) return;
+
+    setIsLoading(true);
+    try {
+      const response = await fetch(`/api/audit?page=${lastPage.nextPage}`);
+      const nextPage: AuditPage = await response.json();
+      
+      // Verify the new page's hash chain before adding
+      const newPages = [...pages, nextPage];
+      
+      // Check if the chain is broken between last page and new page
+      if (pages.length > 0 && nextPage.rows.length > 0) {
+        const lastRow = pages[pages.length - 1].rows[pages[pages.length - 1].rows.length - 1];
+        const firstNewRow = nextPage.rows[0];
+        
+        if (firstNewRow.previousHash !== lastRow.hash) {
+          setHasBrokenChain(true);
+          setPages(newPages);
+          processPages(newPages);
+          return;
+        }
+      }
+      
+      setPages(newPages);
+      processPages(newPages);
+    } catch (error) {
+      console.error('Failed to load next page:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
-    <div className="relative space-y-3">
-      {!compact ? (
-        <div className="absolute bottom-0 left-[7px] top-0 hidden w-px bg-[hsl(var(--border))] md:block" />
-      ) : null}
-      {visible.map((entry) => (
-        <div
-          key={entry.id}
-          className={`relative surface rounded-xl p-4 transition hover:border-[hsl(var(--accent)/0.15)] ${compact ? "" : "md:ml-5"}`}
-        >
-          {!compact ? (
-            <div className="absolute -left-[3px] top-6 hidden h-2 w-2 rounded-full border border-[hsl(var(--accent)/0.5)] bg-[hsl(var(--accent)/0.3)] md:block" />
-          ) : null}
-          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
-            <div className="min-w-0 flex-1">
-              <p className="font-medium break-words">{entry.action.name}</p>
-              <p className="mt-0.5 text-xs text-[hsl(var(--muted-foreground))]">
-                <span className="hidden sm:inline">{new Date(entry.timestamp).toLocaleString()}</span>
-                <span className="sm:hidden">
-                  {new Date(entry.timestamp).toLocaleDateString()}{" "}
-                  {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </span>
-                {" "}· {entry.action.amountXLM} XLM
-              </p>
-            </div>
-            <div className="flex shrink-0 sm:block">
-              <DecisionBadge decision={entry.decision} />
-            </div>
-          </div>
-          {!compact ? (
-            <div className="mt-3 space-y-2 text-sm text-[hsl(var(--muted-foreground))]">
-              <p className="rounded-lg bg-[hsl(var(--muted)/0.35)] px-3 py-2 break-words">{entry.explanation}</p>
-              <p className="inline-flex items-center gap-1 text-xs break-all" title={entry.id}>
-                <ScrollText aria-hidden="true" className="h-3 w-3 shrink-0" /> {entry.id}
-              </p>
-              {entry.entryHash ? (
-                <p className="inline-flex items-center gap-1 text-xs font-mono" title={entry.entryHash}>
-                  <Fingerprint aria-hidden="true" className="h-3 w-3 shrink-0" /> {truncateMiddle(entry.entryHash, 8, 8)}
-                </p>
-              ) : null}
-              {entry.stellarTxHash ? (
-                <p className="inline-flex items-center gap-1 text-xs font-mono" title={entry.stellarTxHash}>
-                  <Fingerprint aria-hidden="true" className="h-3 w-3 shrink-0" /> {truncateMiddle(entry.stellarTxHash, 8, 8)}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <p className="mt-2 truncate text-xs text-[hsl(var(--muted-foreground))]">{entry.explanation}</p>
-          )}
-          {!compact ? (
-            <div className="mt-2 grid gap-2 sm:grid-cols-3">
-              <div className="rounded-lg bg-[hsl(var(--muted)/0.35)] px-3 py-2 text-xs">
-                <p className="mb-0.5 uppercase tracking-wider text-[hsl(var(--accent))]">Tool</p>
-                <p className="truncate" title={entry.action.name}>
-                  {entry.action.name}
-                </p>
-              </div>
-              <div className="rounded-lg bg-[hsl(var(--muted)/0.35)] px-3 py-2 text-xs">
-                <p className="mb-0.5 uppercase tracking-wider text-[hsl(var(--accent))]">Amount</p>
-                {entry.action.amountXLM} XLM
-              </div>
-              <div className="rounded-lg bg-[hsl(var(--muted)/0.35)] px-3 py-2 text-xs">
-                <p className="mb-0.5 inline-flex items-center gap-1 uppercase tracking-wider text-[hsl(var(--accent))]">
-                  <Clock4 aria-hidden="true" className="h-3 w-3" /> Time
-                </p>
-                {new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-              </div>
-            </div>
-          ) : null}
+    <div className="space-y-4">
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timestamp</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Details</th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {visibleRows.map((row) => (
+              <tr key={row.id} className={hasBrokenChain ? 'opacity-50' : ''}>
+                <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{row.timestamp}</td>
+                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{row.action}</td>
+                <td className="px-6 py-4 text-sm text-gray-500">
+                  <pre className="text-xs">{JSON.stringify(row.details, null, 2)}</pre>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      
+      {!hasBrokenChain && pages[pages.length - 1]?.nextPage && (
+        <div className="flex justify-center mt-4">
+          <button
+            onClick={loadNextPage}
+            disabled={isLoading}
+            className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {isLoading ? 'Loading...' : 'Load More'}
+          </button>
         </div>
-      ))}
+      )}
+      
+      {hasBrokenChain && (
+        <div className="text-center text-red-500 text-sm mt-4">
+          Hash chain broken. No further pages will be loaded.
+        </div>
+      )}
     </div>
   );
 }
