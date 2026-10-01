@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
+import { canPassDecisionGate, evaluateDecision } from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -54,6 +54,17 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
+
+    if (!(await canPassDecisionGate(userId))) {
+      logWarn("Decision route rejected revoked wallet", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 401,
+        body: { error: "Wallet access has been revoked." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
 
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);

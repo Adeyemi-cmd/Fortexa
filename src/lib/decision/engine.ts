@@ -1,4 +1,5 @@
 import { evaluatePolicy } from "@/lib/policy/engine";
+import { isUserWalletRevoked } from "@/lib/storage/user-wallet-store";
 import { evaluateSecurity } from "@/lib/security/analyzer";
 import { checkBlocklist } from "@/lib/security/blocklist";
 import type {
@@ -22,6 +23,11 @@ function decideExplanation(result: DecisionResult): string {
   }
 
   return "Fortexa approved this action. Policy checks and risk analysis are within trusted operating bounds.";
+}
+
+/** A revoked wallet binding cannot authorize another decision. */
+export async function canPassDecisionGate(userId: string): Promise<boolean> {
+  return !(await isUserWalletRevoked(userId));
 }
 
 export async function evaluateDecision(
