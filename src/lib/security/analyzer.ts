@@ -164,23 +164,39 @@ async function fetchBlocklistWithTimeout(): Promise<{
   const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
 
   try {
-    const blocklist = await fetchBlocklist();
-    return { blocklist, status: { blocked: false, timedOut: false } };
-  } catch (err) {
-    // fetchBlocklist records the failure in its health before rethrowing, so
-    // read the health back to classify the failure instead of the error alone.
-    const health = getBlocklistHealth();
-    const error =
-      health.lastError ??
-      (err instanceof Error ? err.message : "Unknown fetch error");
-    const timedOut =
-      controller.signal.aborted ||
-      (err instanceof Error && err.name === "AbortError") ||
-      /abort|timeout/i.test(error);
+    const controller = new AbortController();
+    const { blocklistTimeoutMs } = getAnalyzerConfig();
+    const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
 
-    return {
-      blocklist: [],
-      status: { blocked: true, timedOut, error },
+    try {
+      const blocklist = await fetchBlocklist();
+      clearTimeout(timeoutId);
+      const health = getBlocklistHealth();
+      if (health.lastError) {
+        return {
+          blocklist,
+          status: {
+            blocked: true,
+            timedOut: false,
+            error: health.lastError,
+          },
+        };
+      }
+      return { blocklist, status: { blocked: false, timedOut: false } };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (err) {
+    const isTimeout = err instanceof Error && err.name === "AbortError";
+    const health = getBlocklistHealth();
+    const blocklist: string[] = [];
+    return { 
+      blocklist, 
+      status: { 
+        blocked: true, 
+        timedOut: isTimeout || /abort|timeout/i.test(health.lastError || ""), 
+        error: health.lastError || "Blocklist fetch failed" 
+      } 
     };
   } finally {
     clearTimeout(timeoutId);

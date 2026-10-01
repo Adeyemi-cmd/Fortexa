@@ -9,7 +9,8 @@ export type StellarSubmitResult =
   | "validation_failure"
   | "idempotency_replay"
   | "idempotency_conflict"
-  | "source_wallet_mismatch";
+  | "source_wallet_mismatch"
+  | "signer_wallet_mismatch";
 
 export const ALLOWED_ROUTES = new Set<string>([
   "/api/auth/challenge",

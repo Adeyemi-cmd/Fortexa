@@ -179,6 +179,7 @@ export async function POST(request: NextRequest) {
       role: roles.includes("operator") ? "operator" : roles[0],
       roles,
       userId,
+      publicKey: normalizedWallet,
     });
 
     const response = jsonWithRequestContext(request, {

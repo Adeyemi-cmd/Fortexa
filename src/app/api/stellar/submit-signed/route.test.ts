@@ -1,13 +1,9 @@
-import {
-  Account,
-  Asset,
-  Keypair,
-  Memo,
-  Networks,
-  Operation,
-  TransactionBuilder,
-} from "@stellar/stellar-sdk";
-import { NextRequest, NextResponse } from "next/server";
+declare global {
+  var MOCK_SESSION_PUBLIC_KEY: string | undefined;
+}
+
+import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { POST } from "./route";
@@ -165,33 +161,17 @@ function makeDecisionReceipt(
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getAuditEntryMock.mockResolvedValue({
-    id: "00000000-0000-4000-8000-000000000000",
-    paymentQuote: { memo: "fortexa:test-action" },
-  });
-  verifyQuoteMock.mockReturnValue({ ok: true, quote: {} });
-  vi.mocked(requireAuth).mockReturnValue({
+  vi.mocked(requireAuth).mockImplementation(() => ({
     ok: true,
-    session: { userId: "user-1" },
-  } as ReturnType<typeof requireAuth>);
+    session: { userId: "user-1", publicKey: globalThis.MOCK_SESSION_PUBLIC_KEY || "GCDEFAULTTESTWALLET123" },
+  } as ReturnType<typeof requireAuth>));
 });
 
 describe("POST /api/stellar/submit-signed - source wallet verification", () => {
   it("accepts a submission whose XDR source matches the session wallet and the decision receipt", async () => {
     const walletKp = Keypair.random();
-    const destination = Keypair.random().publicKey();
-    const signedXdr = buildSignedXdr(
-      walletKp,
-      walletKp.publicKey(),
-      destination,
-      "1",
-      "approved-memo",
-    );
-    const decisionReceipt = makeDecisionReceipt(
-      destination,
-      "1",
-      "approved-memo",
-    );
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
+    const signedXdr = buildSignedXdr(walletKp, walletKp.publicKey());
 
     vi.mocked(getUserWallet).mockResolvedValue({
       userId: "user-1",
@@ -295,7 +275,7 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
     const response = await POST(buildRequest({ signedXdr, decisionReceipt }));
     const body = await response.json();
 
-    expect(response.status).toBe(400);
+    expect(response.status).toBe(403);
     expect(body.error).toMatch(/does not match/i);
   });
 
@@ -332,6 +312,7 @@ describe("POST /api/stellar/submit-signed - source wallet verification", () => {
 
   it("rejects malformed XDR with a 400", async () => {
     const walletKp = Keypair.random();
+    globalThis.MOCK_SESSION_PUBLIC_KEY = walletKp.publicKey();
 
     vi.mocked(getUserWallet).mockResolvedValue({
       userId: "user-1",

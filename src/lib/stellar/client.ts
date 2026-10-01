@@ -123,3 +123,30 @@ export async function submitSignedTransactionXdr(signedXdr: string) {
 }
 
 export { getStellarHorizonUrl };
+
+import { Keypair } from "@stellar/stellar-sdk";
+
+export function verifySignedXdrSigner(signedXdr: string, publicKey: string): boolean {
+  const { networkPassphrase } = assertStellarNetworkConfig();
+
+  let decoded;
+  try {
+    decoded = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  } catch {
+    return false;
+  }
+
+  const kp = Keypair.fromPublicKey(publicKey);
+  const hash = decoded.hash();
+  
+  for (const sig of decoded.signatures) {
+    try {
+      if (kp.verify(hash, sig.signature())) {
+        return true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false;
+}

@@ -98,6 +98,7 @@ function operatorCookie() {
     email: "idem-operator@fortexa.local",
     role: "signer",
     userId: OPERATOR_USER_ID,
+    publicKey: OPERATOR_WALLET_KEYPAIR.publicKey(),
     expiresInSeconds: 300,
   });
 

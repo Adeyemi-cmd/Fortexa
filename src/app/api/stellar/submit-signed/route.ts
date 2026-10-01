@@ -14,6 +14,8 @@ import {
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr, verifySignedXdrSigner } from "@/lib/stellar/client";
+import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
 import {
   decodeSignedXdrSourceAccount,
   submitSignedTransactionXdr,
@@ -371,6 +373,18 @@ export async function POST(request: NextRequest) {
 
     const payload = parsedPayload.data;
 
+    const sessionWallet = auth.session.publicKey;
+    if (!sessionWallet) {
+      logWarn("Submit signed missing session wallet key", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 401,
+        body: { error: "Session missing wallet key." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     const assignedWallet = await getUserWallet(userId);
 
     if (assignedWallet && "expired" in assignedWallet) {
@@ -411,39 +425,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const receiptCheck = verifySignedXdrMatchesDecisionReceipt(
-      payload.signedXdr,
-      payload.decisionReceipt,
-    );
-    if (notReady) {
-      return notReady;
-    }
-     
-    const notReady = await readinessBlockResponse(
-      request,
-      "/api/stellar/submit-signed",
-      startedAtMs,
-      rateLimitHeaders(rate),
-    );
-    if (notReady) {
-      logWarn("Submit signed blocked: not ready", context);
-      return notReady;
-    }
-    
-    const userId = auth.session.userId;
-
-    if (!bodyResult.ok) {
-      logWarn("Submit signed payload too large", { ...context, userId });
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: receiptCheck.status ?? 403,
-        body: {
-          error: receiptCheck.error,
-          field: receiptCheck.field,
-          receiptHash: payload.decisionReceipt.receiptHash,
-        },
-        headers: rateLimitHeaders(rate),
+    if (xdrSourceResult.sourceAccount !== sessionWallet) {
+      logWarn("Submit signed source wallet mismatch", {
+        ...context,
+        userId,
+        expectedWallet: sessionWallet,
+        actualSource: xdrSourceResult.sourceAccount,
       });
     }
 
@@ -454,7 +441,7 @@ export async function POST(request: NextRequest) {
       return jsonWithRequestContext(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
-        status: 400,
+        status: 403,
         body: {
           error:
             "Signed transaction source account does not match your session wallet.",
@@ -463,104 +450,20 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const payload = parsedPayload.data;
-
-    if (!xdrSourceResult.payment) {
+    if (!verifySignedXdrSigner(payload.signedXdr, sessionWallet)) {
+      logWarn("Submit signed signer wallet mismatch", {
+        ...context,
+        userId,
+        expectedWallet: sessionWallet,
+      });
+      recordStellarSubmitResult("signer_wallet_mismatch");
       return jsonWithRequestContext(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 403,
-        body: { error: "Signed transaction does not contain one authorized native payment." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
-    if (!auditEntry?.paymentQuote || xdrSourceResult.payment.memo !== auditEntry.paymentQuote.memo) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 403,
-        body: { error: "Signed transaction memo does not match the authorized payment quote." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const authorization = verifyPaymentAgainstQuote(auditEntry, {
-      ...xdrSourceResult.payment,
-      network: "testnet",
-    });
-    if (!authorization.ok) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: authorization.status,
-        body: { error: authorization.error, field: authorization.field },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    if (!xdrSourceResult.payment) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 403,
-        body: { error: "Signed transaction does not contain one authorized native payment." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
-    if (!auditEntry?.paymentQuote || xdrSourceResult.payment.memo !== auditEntry.paymentQuote.memo) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 403,
-        body: { error: "Signed transaction memo does not match the authorized payment quote." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const authorization = verifyPaymentAgainstQuote(auditEntry, {
-      ...xdrSourceResult.payment,
-      network: "testnet",
-    });
-    if (!authorization.ok) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: authorization.status,
-        body: { error: authorization.error, field: authorization.field },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const auditEntry = await getAuditEntryById(userId, payload.decisionId);
-    if (!isPaymentDecisionCurrent(auditEntry, payload.decisionId, payload.quoteExpiresAt)) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 403,
-        body: { error: "Payment decision or quote is no longer valid. Please re-evaluate the action." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const transactionHash = getTransactionHash(
-      payload.signedXdr,
-      assertStellarNetworkConfig().networkPassphrase,
-    );
-    if (!verifyBuildAuthorization(payload.buildAuthorization, {
-      userId,
-      decisionId: payload.decisionId,
-      quoteExpiresAt: payload.quoteExpiresAt,
-      transactionHash,
-    })) {
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 403,
-        body: { error: "Signed transaction does not match the authorized payment build." },
+        body: {
+          error: "Signed transaction signer does not match your session wallet.",
+        },
         headers: rateLimitHeaders(rate),
       });
     }

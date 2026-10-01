@@ -74,6 +74,7 @@ function operatorCookie() {
     role: "operator",
     roles: ["operator", "signer"],
     userId: OPERATOR_USER_ID,
+    publicKey: sourceKeypair.publicKey(),
     expiresInSeconds: 300,
   });
 
