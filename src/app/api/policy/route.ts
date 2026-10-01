@@ -8,6 +8,7 @@ import { readJsonBody } from "@/lib/http/read-json-body";
 import { z } from "zod";
 
 import { DuplicateRuleError, validateNoDuplicateRules } from "@/lib/policy/engine";
+import { parsePolicyImport, policyImportMatchesActive } from "@/lib/policy/import-export";
 import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
@@ -88,6 +89,55 @@ export async function POST(request: NextRequest) {
         startedAtMs,
         status: 413,
         body: { error: bodyResult.error },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (typeof bodyResult.data === "object" && bodyResult.data !== null &&
+        "format" in bodyResult.data) {
+      const imported = parsePolicyImport(bodyResult.data);
+      if (!imported.ok) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: { error: imported.error },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      validateNoDuplicateRules(imported.document.policy);
+      const active = await getPolicyConfig();
+      const mismatch = policyImportMatchesActive(imported.document, active);
+      if (mismatch) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: imported.document.version !== active.version ? 409 : 422,
+          body: { error: mismatch },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      // Importing an unchanged export is a round trip, not a new policy revision.
+      if (JSON.stringify(imported.document.policy) === JSON.stringify(active.policy)) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 200,
+          body: active,
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      const updated = await updatePolicyConfig(imported.document.policy, auth.session.userId, {
+        expectedVersion: imported.document.version,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 200,
+        body: updated,
         headers: rateLimitHeaders(rate),
       });
     }
