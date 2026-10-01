@@ -1,16 +1,20 @@
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { z } from "zod";
 
-import { DuplicateRuleError } from "@/lib/policy/engine";
+import { DuplicateRuleError, validateNoDuplicateRules } from "@/lib/policy/engine";
+import { parsePolicyImport, policyImportMatchesActive } from "@/lib/policy/import-export";
 import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
+import { getStellarNetworkFingerprint, resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -81,6 +85,21 @@ export async function POST(request: NextRequest) {
 
   try {
     const bodyResult = await readJsonBody(request);
+    if (bodyResult.ok && isLoginAuthorizationPayload(bodyResult.data)) {
+      logWarn("Policy update rejected login payload", {
+        ...context,
+        userId: auth.session.userId,
+        code: "login_payload",
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Login signatures cannot authorize a policy write." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     if (!bodyResult.ok) {
       logWarn("Policy update payload too large", { ...context, userId: auth.session.userId });
       return jsonWithRequestContext(request, {
@@ -88,6 +107,72 @@ export async function POST(request: NextRequest) {
         startedAtMs,
         status: 413,
         body: { error: bodyResult.error },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (typeof bodyResult.data === "object" && bodyResult.data !== null &&
+        "format" in bodyResult.data) {
+      const imported = parsePolicyImport(bodyResult.data);
+      if (!imported.ok) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: { error: imported.error },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      validateNoDuplicateRules(imported.document.policy);
+      const active = await getPolicyConfig();
+      const mismatch = policyImportMatchesActive(imported.document, active);
+      if (mismatch) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: imported.document.version !== active.version ? 409 : 422,
+          body: { error: mismatch },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      // Importing an unchanged export is a round trip, not a new policy revision.
+      if (JSON.stringify(imported.document.policy) === JSON.stringify(active.policy)) {
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 200,
+          body: active,
+          headers: rateLimitHeaders(rate),
+        });
+      }
+
+      const updated = await updatePolicyConfig(imported.document.policy, auth.session.userId, {
+        expectedVersion: imported.document.version,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Policy payload contains a sensitive field." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const expectedNetwork = request.headers.get("x-fortexa-network-fingerprint");
+    if (
+      !resolveStellarNetworkConfig().ok ||
+      (expectedNetwork !== null && expectedNetwork !== getStellarNetworkFingerprint())
+    ) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 409,
+        body: {
+          error: "Server network configuration is mismatched; saving is disabled.",
+          code: "NETWORK_MISMATCH",
+        },
         headers: rateLimitHeaders(rate),
       });
     }
@@ -103,6 +188,35 @@ export async function POST(request: NextRequest) {
         body: { error: "Invalid policy payload.", details: toPublicValidationDetails(parsed.error) },
         headers: rateLimitHeaders(rate),
       });
+    }
+
+    // A client can bypass the editor and POST here directly, so run the same
+    // rule-level check the validate route runs. A document the validate route
+    // rejects must never activate through this route either.
+    try {
+      validateNoDuplicateRules(parsed.data);
+    } catch (error) {
+      if (error instanceof DuplicateRuleError) {
+        logWarn("Policy update rejected: duplicate rule identifier", {
+          ...context,
+          userId: auth.session.userId,
+          field: error.field,
+          duplicateValue: error.value,
+        });
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: {
+            error: error.message,
+            code: "DUPLICATE_RULE_IDENTIFIER",
+            field: error.field,
+            duplicateValue: error.value,
+          },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+      throw error;
     }
 
     const versionMeta = z.object({

@@ -2,6 +2,7 @@ import { Networks } from "@stellar/stellar-sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  getStellarNetworkFingerprint,
   inferStellarNetworkProfile,
   resolveStellarNetworkConfig,
 } from "@/lib/stellar/network-config";
@@ -55,6 +56,16 @@ describe("resolveStellarNetworkConfig", () => {
       expect(config.profile).toBe("public");
       expect(config.networkPassphrase).toBe(Networks.PUBLIC);
     }
+  });
+
+  it("changes the settings fingerprint when the server switches networks", () => {
+    process.env.STELLAR_HORIZON_URL = "https://horizon-testnet.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+    const displayedFingerprint = getStellarNetworkFingerprint();
+
+    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
+    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.PUBLIC;
+    expect(getStellarNetworkFingerprint()).not.toBe(displayedFingerprint);
   });
 
   it("rejects testnet Horizon with the public passphrase", () => {

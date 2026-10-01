@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { createSessionToken, verifySessionToken } from "@/lib/auth/session";
@@ -36,5 +38,30 @@ describe("auth session", () => {
 
     const session = verifySessionToken(tampered);
     expect(session).toBeNull();
+  });
+
+  it("preserves additive operator and signer roles", () => {
+    process.env.FORTEXA_AUTH_SECRET = "unit-test-secret";
+    const token = createSessionToken({
+      email: "dual@fortexa.local",
+      role: "operator",
+      roles: ["operator", "signer"],
+      userId: "dual-user",
+      expiresInSeconds: 60,
+    });
+
+    expect(verifySessionToken(token)?.roles).toEqual(["operator", "signer"]);
+  });
+
+  it("keeps a given session id and mints a new one otherwise", () => {
+    process.env.FORTEXA_AUTH_SECRET = "unit-test-secret";
+
+    const carried = createSessionToken({ email: "e", role: "viewer", userId: "u", sessionId: "sid-1" });
+    const first = createSessionToken({ email: "e", role: "viewer", userId: "u" });
+    const second = createSessionToken({ email: "e", role: "viewer", userId: "u" });
+
+    expect(verifySessionToken(carried)?.sid).toBe("sid-1");
+    expect(verifySessionToken(first)?.sid).toBeTruthy();
+    expect(verifySessionToken(first)?.sid).not.toBe(verifySessionToken(second)?.sid);
   });
 });

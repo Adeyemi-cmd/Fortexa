@@ -10,11 +10,11 @@ import { POST as DecisionPOST } from "@/app/api/decision/route";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { DEFAULT_JSON_BODY_MAX_BYTES } from "@/lib/http/read-json-body";
 
-function operatorCookie() {
+function signerCookie() {
   process.env.FORTEXA_AUTH_SECRET = "submit-signed-body-limit-secret";
   const token = createSessionToken({
-    email: "operator@fortexa.local",
-    role: "operator",
+    email: "signer@fortexa.local",
+    role: "signer",
     userId: "submit-signed-body-limit-operator",
     expiresInSeconds: 120,
   });
@@ -29,7 +29,7 @@ describe("POST /api/stellar/submit-signed body limits", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie: operatorCookie(),
+        cookie: signerCookie(),
       },
       body: `{"signedXdr":"${padding}"}`,
     });
@@ -46,7 +46,7 @@ describe("POST /api/stellar/submit-signed body limits", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie: operatorCookie(),
+        cookie: signerCookie(),
       },
       body: "{not-json",
     });
@@ -66,7 +66,7 @@ describe("POST /api/stellar/submit-signed validation redaction", () => {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie: operatorCookie(),
+        cookie: signerCookie(),
       },
       body: JSON.stringify({ signedXdr: secretXdr }),
     });

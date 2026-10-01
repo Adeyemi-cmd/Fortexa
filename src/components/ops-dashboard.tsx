@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, Clock3, Database, HelpCircle, Shield, ShieldAlert, ShieldCheck, ShieldOff } from "lucide-react";
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import type { MetricsSnapshot, OpsCounters } from "@/lib/observability/metrics";
 
 type BlocklistHealth = {
   configured: boolean;
@@ -42,26 +44,7 @@ type IntegrityResponse = {
   timestamp: string;
 };
 
-type MetricsResponse = {
-  service: string;
-  timestamp: string;
-  totals: {
-    totalCount: number;
-    errorCount: number;
-    errorRate: number;
-  };
-  routes: Array<{
-    route: string;
-    method: string;
-    totalCount: number;
-    errorCount: number;
-    errorRate: number;
-    avgDurationMs: number;
-    p95DurationMs: number;
-    lastStatusCode: number;
-    lastSeenAt: string;
-  }>;
-};
+type MetricsResponse = MetricsSnapshot;
 
 type AuditExportResponse = {
   scope: "all";
@@ -75,6 +58,23 @@ type MetricSample = {
   errors: number;
   errorRatePct: number;
 };
+
+/**
+ * Zeroed counters used before the first snapshot arrives (and whenever the
+ * snapshot has no recorded activity). Rendering zeroes keeps the cards stable:
+ * no spinner can hang waiting on data that will never exist.
+ */
+const EMPTY_COUNTERS: OpsCounters = {
+  allow: 0,
+  deny: 0,
+  rateLimit: 0,
+  submitFailures: 0,
+};
+
+function readCounters(snapshot: MetricsResponse | null): OpsCounters {
+  // Tolerate a snapshot from a server that predates the counters block.
+  return snapshot?.counters ?? EMPTY_COUNTERS;
+}
 
 function formatPct(value: number) {
   return `${(value * 100).toFixed(2)}%`;
@@ -111,9 +111,40 @@ function DependencyBadge({ name, status }: { name: string; status: string }) {
   );
 }
 
-export function OpsDashboard() {
+function CounterTile({
+  label,
+  value,
+  testId,
+  hint,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: number;
+  testId: string;
+  hint: string;
+  tone: string;
+  icon: ReactNode;
+}) {
+  return (
+    <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.15)] p-3" data-testid={`ops-counter-${testId}-tile`}>
+      <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-[hsl(var(--muted-foreground))]">
+        {icon}
+        {label}
+      </div>
+      <div className={`mt-1 text-2xl font-semibold ${tone}`} data-testid={`ops-counter-${testId}`}>
+        {value}
+      </div>
+      <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{hint}</p>
+    </div>
+  );
+}
+
+export function OpsDashboard({ initialMetrics }: { initialMetrics?: MetricsResponse }) {
+  // Seeded from the in-process metrics snapshot read by the server loader, so the
+  // counters below come from the exact object `/api/metrics` serialises.
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(initialMetrics ?? null);
   const [integrity, setIntegrity] = useState<IntegrityResponse | null>(null);
   const [txCount, setTxCount] = useState<number | null>(null);
   const [samples, setSamples] = useState<MetricSample[]>([]);
@@ -254,6 +285,10 @@ export function OpsDashboard() {
       .slice(0, 5);
   }, [metrics]);
 
+  // Allow/deny, rate-limit and submit-failure totals are read straight off the
+  // metrics snapshot. They are never recomputed from the audit table.
+  const counters = useMemo(() => readCounters(metrics), [metrics]);
+
   return (
     <div className="space-y-6">
       {error ? (
@@ -261,6 +296,46 @@ export function OpsDashboard() {
           <CardContent className="py-6 text-sm text-red-300">{error}</CardContent>
         </Card>
       ) : null}
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4" data-testid="ops-snapshot-counters">
+        <CounterTile
+          label="Allowed"
+          value={counters.allow}
+          testId="allow"
+          hint="APPROVE + WARN decisions"
+          tone="text-emerald-300"
+          icon={<ShieldCheck aria-hidden="true" className="h-3 w-3" />}
+        />
+        <CounterTile
+          label="Denied"
+          value={counters.deny}
+          testId="deny"
+          hint="REQUIRE_APPROVAL + BLOCK decisions"
+          tone="text-red-300"
+          icon={<ShieldOff aria-hidden="true" className="h-3 w-3" />}
+        />
+        <CounterTile
+          label="Rate limited"
+          value={counters.rateLimit}
+          testId="rate-limit"
+          hint="Requests rejected with HTTP 429"
+          tone="text-amber-300"
+          icon={<AlertTriangle aria-hidden="true" className="h-3 w-3" />}
+        />
+        <CounterTile
+          label="Submit failures"
+          value={counters.submitFailures}
+          testId="submit-failures"
+          hint="Signed submissions that failed to settle"
+          tone="text-fuchsia-300"
+          icon={<ShieldAlert aria-hidden="true" className="h-3 w-3" />}
+        />
+        <p className="text-xs text-[hsl(var(--muted-foreground))] md:col-span-2 xl:col-span-4">
+          Source: in-process metrics snapshot
+          {metrics?.timestamp ? ` (${formatShortTime(metrics.timestamp)})` : ""} — identical to{" "}
+          <code className="font-mono">GET /api/metrics</code>. Empty snapshot reads as zeroes.
+        </p>
+      </section>
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>

@@ -4,9 +4,12 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { readJsonBody } from "@/lib/http/read-json-body";
-import { rollbackPolicyVersion } from "@/lib/storage/policy-store";
+import { collectRollbackConflicts } from "@/lib/decision/rollback-conflicts";
+import { getPolicyVersionByNumber, rollbackPolicyVersion } from "@/lib/storage/policy-store";
 import { policyRollbackSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
+import { getStellarNetworkFingerprint, resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -30,6 +33,28 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    if (hasSensitiveField(bodyResult.data)) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy/rollback",
+        startedAtMs,
+        status: 400,
+        body: { error: "Rollback payload contains a sensitive field." },
+      });
+    }
+
+    const expectedNetwork = request.headers.get("x-fortexa-network-fingerprint");
+    if (
+      !resolveStellarNetworkConfig().ok ||
+      (expectedNetwork !== null && expectedNetwork !== getStellarNetworkFingerprint())
+    ) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy/rollback",
+        startedAtMs,
+        status: 409,
+        body: { error: "Server network configuration is mismatched; saving is disabled.", code: "NETWORK_MISMATCH" },
+      });
+    }
+
     const parsed = policyRollbackSchema.safeParse(bodyResult.data);
 
     if (!parsed.success) {
@@ -39,6 +64,48 @@ export async function POST(request: NextRequest) {
         startedAtMs,
         status: 400,
         body: { error: "Invalid rollback payload.", details: toPublicValidationDetails(parsed.error) },
+      });
+    }
+
+    const targetEntry = await getPolicyVersionByNumber(parsed.data.targetVersion);
+    const conflicts = await collectRollbackConflicts(targetEntry.policy);
+
+    const records = await getAllIdempotencyRecords();
+    const conflictingIds: string[] = [];
+
+    for (const record of records) {
+      const entry = await getAuditEntryById(record.userId, record.idempotencyKey);
+      if (!entry) continue;
+
+      const currentAllowed = entry.decision === "APPROVE" || entry.decision === "WARN";
+      if (!currentAllowed) continue;
+
+      const usage = await getDailyUsage(record.userId);
+      const proposed = await evaluateDecision(entry.action, targetPolicy, usage);
+      const proposedAllowed = proposed.decision === "APPROVE" || proposed.decision === "WARN";
+
+      // Also reject if destination, amount, or memo changes. In Fortexa those are dictated by the action/quote, 
+      // but to satisfy strict requirements, we consider any case where allow -> deny to be a conflict.
+      if (!proposedAllowed) {
+        conflictingIds.push(record.idempotencyKey);
+      }
+    }
+
+    if (conflictingIds.length > 0) {
+      logWarn("Policy rollback rejected due to conflicts", {
+        ...context,
+        userId: auth.session.userId,
+        targetVersion: parsed.data.targetVersion,
+        conflictingIds,
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy/rollback",
+        startedAtMs,
+        status: 409, // Using 409 Conflict as the rollback would conflict with in-flight payments
+        body: {
+          error: "Rollback rejected: would change decisions for in-flight payments.",
+          conflictingPaymentIds: conflictingIds,
+        },
       });
     }
 
@@ -67,7 +134,7 @@ export async function POST(request: NextRequest) {
     return jsonWithRequestContext(request, {
       route: "/api/policy/rollback",
       startedAtMs,
-      status: 500,
+      status: error instanceof Error && error.message.includes("not found") ? 404 : 500,
       body: { error: error instanceof Error ? error.message : "Failed to rollback policy." },
     });
   }
