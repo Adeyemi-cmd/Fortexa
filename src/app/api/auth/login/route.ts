@@ -9,7 +9,7 @@ import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
+import { upsertUserWallet, WalletAlreadyBoundError } from "@/lib/storage/user-wallet-store";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 const loginSchema = z.object({
@@ -174,6 +174,16 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof WalletAlreadyBoundError) {
+      return jsonWithRequestContext(request, {
+        route: "/api/auth/login",
+        startedAtMs,
+        status: 409,
+        body: { error: error.message },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     logError("Auth login internal error", {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",

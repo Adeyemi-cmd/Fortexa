@@ -19,6 +19,20 @@ type WalletStoreFile = {
 };
 
 const storePath = getFortexaStorePath("wallets.json");
+let fallbackWriteQueue = Promise.resolve();
+
+export class WalletAlreadyBoundError extends Error {
+  constructor() {
+    super("This Stellar wallet is already bound to another user.");
+    this.name = "WalletAlreadyBoundError";
+  }
+}
+
+function withFallbackWriteLock<T>(operation: () => Promise<T>): Promise<T> {
+  const result = fallbackWriteQueue.then(operation, operation);
+  fallbackWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 async function ensureStore() {
   await fs.mkdir(getFortexaStoreDir(), { recursive: true });
@@ -152,72 +166,111 @@ export async function upsertUserWallet(
     expiresAt?: string;
   }
 ) {
+  const publicKey = payload.publicKey.trim().toUpperCase();
   const db = await runWithDatabase("upsertUserWallet", async (pool) => {
-    const existing = await pool.query<{ created_at: string }>(
-      `
-        SELECT created_at
-        FROM fortexa_wallets
-        WHERE user_id = $1
-      `,
-      [userId]
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [publicKey]);
 
-    const nowIso = new Date().toISOString();
-    const createdAt = existing.rows[0]?.created_at
-      ? new Date(existing.rows[0].created_at).toISOString()
-      : nowIso;
-    // Default expiration to 24 hours from now if not provided
-    const expiresAt = payload.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const owner = await client.query<{ user_id: string }>(
+        `
+          SELECT user_id
+          FROM fortexa_wallets
+          WHERE public_key = $1
+            AND user_id <> $2
+            AND (expires_at IS NULL OR expires_at > NOW())
+          LIMIT 1
+        `,
+        [publicKey, userId]
+      );
 
-    await pool.query(
-      `
-        INSERT INTO fortexa_wallets (user_id, public_key, source, provider, created_at, updated_at, expires_at)
-        VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::timestamptz)
-        ON CONFLICT (user_id)
-        DO UPDATE SET
-          public_key = EXCLUDED.public_key,
-          source = EXCLUDED.source,
-          provider = EXCLUDED.provider,
-          updated_at = EXCLUDED.updated_at,
-          expires_at = EXCLUDED.expires_at
-      `,
-      [userId, payload.publicKey, payload.source, payload.provider ?? null, createdAt, nowIso, expiresAt]
-    );
+      if (owner.rows.length > 0) {
+        await client.query("COMMIT");
+        return { conflict: true as const };
+      }
 
-    return {
-      userId,
-      publicKey: payload.publicKey,
-      source: payload.source,
-      provider: payload.provider,
-      createdAt,
-      updatedAt: nowIso,
-      expiresAt,
-    };
+      const existing = await client.query<{ created_at: string }>(
+        "SELECT created_at FROM fortexa_wallets WHERE user_id = $1",
+        [userId]
+      );
+      const nowIso = new Date().toISOString();
+      const createdAt = existing.rows[0]?.created_at
+        ? new Date(existing.rows[0].created_at).toISOString()
+        : nowIso;
+      const expiresAt = payload.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+      await client.query(
+        `
+          INSERT INTO fortexa_wallets (user_id, public_key, source, provider, created_at, updated_at, expires_at)
+          VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7::timestamptz)
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            public_key = EXCLUDED.public_key,
+            source = EXCLUDED.source,
+            provider = EXCLUDED.provider,
+            updated_at = EXCLUDED.updated_at,
+            expires_at = EXCLUDED.expires_at
+        `,
+        [userId, publicKey, payload.source, payload.provider ?? null, createdAt, nowIso, expiresAt]
+      );
+
+      await client.query("COMMIT");
+      return {
+        userId,
+        publicKey,
+        source: payload.source,
+        provider: payload.provider,
+        createdAt,
+        updatedAt: nowIso,
+        expiresAt,
+      };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   if (db.available) {
+    if ("conflict" in db.value) {
+      throw new WalletAlreadyBoundError();
+    }
     return db.value;
   }
 
-  const store = await readStore();
-  const now = new Date().toISOString();
-  const existing = await getUserWallet(userId);
-  const createdAt = (existing && !("expired" in existing)) ? existing.createdAt : now;
-  const expiresAt = payload.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  return withFallbackWriteLock(async () => {
+    const store = await readStore();
+    const now = new Date().toISOString();
+    const current = store.wallets[userId] as UserWallet | undefined;
+    const currentIsActive = Boolean(current) && (!current.expiresAt || new Date(current.expiresAt).getTime() >= Date.now());
+    const owner = Object.values(store.wallets).find((wallet) => {
+      if (!wallet || typeof wallet !== "object" || !("publicKey" in wallet)) return false;
+      const candidate = wallet as UserWallet;
+      const active = !candidate.expiresAt || new Date(candidate.expiresAt).getTime() >= Date.now();
+      return candidate.userId !== userId && candidate.publicKey.trim().toUpperCase() === publicKey && active;
+    });
+    if (owner) {
+      throw new WalletAlreadyBoundError();
+    }
 
-  const next: UserWallet = {
-    userId,
-    publicKey: payload.publicKey,
-    source: payload.source,
-    provider: payload.provider,
-    createdAt: createdAt,
-    updatedAt: now,
-    expiresAt,
-  };
+    const createdAt = currentIsActive ? current.createdAt : now;
+    const expiresAt = payload.expiresAt ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const next: UserWallet = {
+      userId,
+      publicKey,
+      source: payload.source,
+      provider: payload.provider,
+      createdAt,
+      updatedAt: now,
+      expiresAt,
+    };
 
-  store.wallets[userId] = next;
-  await writeStore(store);
-  return next;
+    store.wallets[userId] = next;
+    await writeStore(store);
+    return next;
+  });
 }
 
 export async function findUserWalletByPublicKey(publicKey: string): Promise<UserWallet | null> {

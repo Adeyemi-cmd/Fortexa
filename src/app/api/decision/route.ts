@@ -19,6 +19,7 @@ import {
   consumeUsage,
   getDailyUsage,
 } from "@/lib/storage/audit-store";
+import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { getPolicyConfig } from "@/lib/storage/policy-store";
 import { buildPaymentQuoteFromDecision } from "@/lib/stellar/verify-payment-quote";
 import type { AuditEntry } from "@/lib/types/domain";
@@ -55,6 +56,16 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
+    const assignedWallet = await getUserWallet(userId);
+    if (!assignedWallet || "expired" in assignedWallet) {
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 401,
+        body: { error: "No active wallet mapping found for this user." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
 
     if (!(await canPassDecisionGate(userId))) {
       logWarn("Decision route rejected revoked wallet", { ...context, userId });

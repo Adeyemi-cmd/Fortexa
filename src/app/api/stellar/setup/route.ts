@@ -4,9 +4,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
 import { getRequestLogContext, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { STELLAR_PUBLIC_NETWORK_PASSPHRASE } from "@/lib/stellar/network";
-import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
-import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
+import { getUserWallet, upsertUserWallet, WalletAlreadyBoundError } from "@/lib/storage/user-wallet-store";
 import { stellarSetupRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
@@ -66,7 +64,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const sessionWallet = getWalletFromSession(auth.session);
+    const sessionWallet = await getWalletFromSession(auth.session);
     if (!sessionWallet) {
       return NextResponse.json(
         { error: "Session is not bound to a valid Stellar wallet." },
@@ -94,6 +92,10 @@ export async function POST(request: NextRequest) {
       { headers: rateLimitHeaders(rate) }
     );
   } catch (error) {
+    if (error instanceof WalletAlreadyBoundError) {
+      return NextResponse.json({ error: error.message }, { status: 409, headers: rateLimitHeaders(rate) });
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to setup Stellar testnet wallet." },
       { status: 500, headers: rateLimitHeaders(rate) }

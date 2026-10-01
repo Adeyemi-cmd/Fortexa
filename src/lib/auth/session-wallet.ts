@@ -1,17 +1,19 @@
 const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/u;
 
-export function getWalletFromSession(session: { userId?: string; email?: string }) {
-  const candidates = [session.userId, session.email]
-    .filter((value): value is string => typeof value === "string" && value.length > 0)
-    .map((value) => value.replace(/^wallet:/u, "").trim().toUpperCase());
+import { getUserWallet } from "@/lib/storage/user-wallet-store";
 
-  for (const candidate of candidates) {
-    if (STELLAR_PUBLIC_KEY_REGEX.test(candidate)) {
-      return candidate;
-    }
+export async function getWalletFromSession(session: { userId?: string }) {
+  if (!session.userId) {
+    return null;
   }
 
-  return null;
+  const wallet = await getUserWallet(session.userId);
+  if (!wallet || "expired" in wallet) {
+    return null;
+  }
+
+  const publicKey = wallet.publicKey.trim().toUpperCase();
+  return STELLAR_PUBLIC_KEY_REGEX.test(publicKey) ? publicKey : null;
 }
 
 export type WalletCardStatus = "signed_out" | "unbound" | "not_connected" | "mismatch" | "match";
