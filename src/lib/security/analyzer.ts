@@ -159,6 +159,7 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     const blocklist = await fetchBlocklist();
     const health = getBlocklistHealth();
@@ -172,21 +173,24 @@ async function fetchBlocklistWithTimeout(): Promise<{
         },
       };
     }
-
-    return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
-    const health = getBlocklistHealth();
-    const error = health.lastError ?? (err instanceof Error ? err.message : "Blocklist fetch failed");
-    const timedOut = (err instanceof Error && err.name === "AbortError") || /abort|timeout/i.test(error);
+    const aborted = err instanceof Error && err.name === "AbortError";
 
-    return {
-      blocklist: [],
-      status: {
-        blocked: true,
-        timedOut,
-        error,
-      },
-    };
+    // fetchBlocklist swallows errors internally, so check health for failures
+    const health = getBlocklistHealth();
+    if (health.configured && health.lastError) {
+      const timedOut = aborted || /abort|timeout/i.test(health.lastError);
+      return {
+        blocklist: [],
+        status: {
+          blocked: true,
+          timedOut,
+          error: health.lastError,
+        },
+      };
+    }
+
+    return { blocklist: [], status: { blocked: false, timedOut: false } };
   }
 }
 

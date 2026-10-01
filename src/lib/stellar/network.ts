@@ -11,7 +11,7 @@ function normalizeEnvValue(value: string | undefined) {
 type NetworkEnv = Record<string, string | undefined>;
 
 export function getStellarNetworkPassphrase(
-  env: NetworkEnv = process.env
+  env: Record<string, string | undefined> = process.env
 ) {
   return (
     normalizeEnvValue(env.STELLAR_NETWORK_PASSPHRASE) ??
@@ -20,7 +20,7 @@ export function getStellarNetworkPassphrase(
 }
 
 export function getStellarHorizonUrl(
-  env: NetworkEnv = process.env
+  env: Record<string, string | undefined> = process.env
 ) {
   return (
     normalizeEnvValue(env.STELLAR_HORIZON_URL) ??

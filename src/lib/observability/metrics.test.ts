@@ -252,15 +252,15 @@ describe("observability metrics", () => {
     });
 
     it("drops disallowed decision outcomes and stellar results", () => {
-      // @ts-expect-error -- runtime guard test: valid length but wallet-like value
+      // @ts-expect-error: testing runtime guard for invalid outcome
       recordDecisionOutcome("G" + "A".repeat(55));
-      // @ts-expect-error -- runtime guard test: free-text injection attempt
+      // @ts-expect-error: testing freetext injection guard
       recordDecisionOutcome("APPROVE; wallet=G123");
-      // @ts-expect-error -- runtime guard test: arbitrary non-enum string
+      // @ts-expect-error: testing free-text outcome guard
       recordDecisionOutcome("free-text");
-      // @ts-expect-error -- runtime guard test: unknown stellar submit result
+      // @ts-expect-error: testing invalid stellar result guard
       recordStellarSubmitResult("wallet_leak_payload");
-      // @ts-expect-error -- runtime guard test: wallet-like submit result
+      // @ts-expect-error: testing short wallet-like result guard
       recordStellarSubmitResult("G12345");
 
       expect(getDecisionOutcomeCounts().size).toBe(0);
@@ -280,9 +280,9 @@ describe("observability metrics", () => {
       recordApiMetric({ route: wallet, method: "POST", statusCode: 200, durationMs: 10 });
       recordApiMetric({ route: `/api/decision?wallet=${wallet}`, method: "POST", statusCode: 200, durationMs: 10 });
       // Also try to inject via outcome/result with wallet-like string (should be dropped)
-      // @ts-expect-error -- runtime guard test: wallet address as outcome
+      // @ts-expect-error: testing wallet leak via decision outcome
       recordDecisionOutcome(wallet);
-      // @ts-expect-error -- runtime guard test: wallet address as result
+      // @ts-expect-error: testing wallet leak via stellar result
       recordStellarSubmitResult(wallet);
 
       const output = toPrometheusText();

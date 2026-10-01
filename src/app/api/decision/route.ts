@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
-import { enforceRequestGate, gateErrorHeaders } from "@/lib/security/enforcement-gate";
+import {
+  buildPaymentComparisonFromQuoteInput,
+  evaluateDecision,
+} from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -134,7 +136,21 @@ export async function POST(request: NextRequest) {
 
     const { policy } = await getPolicyConfig();
     const usage = await getDailyUsage(userId);
-    const decision = await evaluateDecision(action, policy, usage);
+
+    // Shared engine path (same function simulate uses): include asset,
+    // amount, destination, and memo in the allow/deny comparison whenever the
+    // caller supplies a payment quote. No transaction is built here.
+    const quoteInput = body.paymentQuote ?? body.paymentQuoteInput;
+    const payment = quoteInput
+      ? buildPaymentComparisonFromQuoteInput({
+          destination: quoteInput.destination,
+          memo: quoteInput.memo,
+          network: quoteInput.network,
+          asset: quoteInput.asset,
+          amountXLM: action.amountXLM,
+        })
+      : undefined;
+    const decision = await evaluateDecision(action, policy, usage, payment);
 
     let finalDecision = decision.decision;
     let explanation = decision.explanation;

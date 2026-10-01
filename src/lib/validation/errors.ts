@@ -38,8 +38,9 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
   const flattened = error.flatten();
   const fieldErrors: Record<string, string[]> = {};
 
-  for (const [field, messages] of Object.entries(flattened.fieldErrors)) {
-    const fieldMessages = Array.isArray(messages) ? messages : [];
+  for (const [field, messages] of Object.entries(flattened.fieldErrors) as Array<
+    [string, string[] | undefined]
+  >) {
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {
