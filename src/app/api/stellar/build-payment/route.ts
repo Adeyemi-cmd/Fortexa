@@ -9,7 +9,10 @@ import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import {
+  logValidationFailure,
+  toPublicValidationDetails,
+} from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const rate = await consumeRateLimit(request, {
@@ -41,7 +44,7 @@ export async function POST(request: NextRequest) {
           issues: readinessReport.issues,
           command: "npm run check:production-readiness",
         },
-        { status: 503, headers: rateLimitHeaders(rate) }
+        { status: 503, headers: rateLimitHeaders(rate) },
       );
     }
 
@@ -51,7 +54,7 @@ export async function POST(request: NextRequest) {
     if (assignedWallet && "expired" in assignedWallet) {
       return NextResponse.json(
         { error: "Session wallet mapping has expired." },
-        { status: 401, headers: rateLimitHeaders(rate) }
+        { status: 401, headers: rateLimitHeaders(rate) },
       );
     }
 
@@ -63,10 +66,17 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
+    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(
+      bodyResult.data,
+    );
 
     if (!parsedPayload.success) {
-      logValidationFailure("Stellar build payment validation failed", { route: "/api/stellar/build-payment", userId }, parsedPayload.error, bodyResult.data);
+      logValidationFailure(
+        "Stellar build payment validation failed",
+        { route: "/api/stellar/build-payment", userId },
+        parsedPayload.error,
+        bodyResult.data,
+      );
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
@@ -128,6 +138,8 @@ export async function POST(request: NextRequest) {
         sourcePublicKey,
         xdr: unsigned.xdr,
         networkPassphrase: unsigned.networkPassphrase,
+        decisionReceipt: verification.quote,
+        paymentQuote: verification.quote,
       },
       { headers: rateLimitHeaders(rate) },
     );

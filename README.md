@@ -506,7 +506,7 @@ or `signedXdr` strings.
 
 ## 13) 📈 Ops / Observability (Appendix)
 
-- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`
+- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`, plus `ready`, `checks`, and `failingChecks` (`production_config`, `storage`, `horizon`). The dashboard shows its pay, fund, and policy actions only while `ready` is `true`.
 - Metrics endpoint: `GET /api/metrics` + Prometheus format
 - `/ops` dashboard shows:
   - service health
@@ -538,7 +538,7 @@ Otherwise Fortexa falls back to local JSON files:
 - Vercel default: `/tmp/fortexa/*.json`
 
 Optional overrides:
-- `FORTEXA_STORE_DIR` to set file-store directory explicitly
+- `FORTEXA_STORE_DIR` to set file-store directory explicitly (the audit file store only opens paths that resolve inside this directory; `..`, absolute paths outside it, and symlinks leading out of it are refused with a `StoragePathError`)
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
   - use an absolute path on Vercel (example: `/tmp/fortexa/shared-security-state.json`)
 - `REDIS_URL` for multi-instance deployments (e.g. Vercel)
@@ -626,3 +626,4 @@ Common Stellar Horizon failures during the signed payment flow:
 MIT (see `package.json`).
 
 All done
+...

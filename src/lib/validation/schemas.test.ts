@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   agentActionSchema,
+  agentPlanSchema,
   agentPlanRequestSchema,
   IDEMPOTENCY_KEY_ERROR,
   IDEMPOTENCY_KEY_MAX,

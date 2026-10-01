@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { createSessionToken, verifySessionToken } from "@/lib/auth/session";

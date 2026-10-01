@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
+import { isSessionGenerationCurrent } from "@/lib/auth/session-store";
 import { buildSecurityHeaders } from "@/lib/security/headers";
 
 const PROTECTED_PREFIXES = [
@@ -26,7 +27,17 @@ function hasValidSession(request: NextRequest) {
   if (!token) {
     return false;
   }
-  return Boolean(verifySessionToken(token));
+
+  const session = verifySessionToken(token, { allowStaleGeneration: true });
+  if (!session) {
+    return false;
+  }
+
+  return isSessionGenerationCurrent({
+    userId: session.userId,
+    sessionId: session.sid,
+    generation: session.gen,
+  });
 }
 
 export function proxy(request: NextRequest) {

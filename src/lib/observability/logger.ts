@@ -4,14 +4,14 @@ import { redactSensitiveFields } from "@/lib/observability/redact";
 
 type LogLevel = "info" | "warn" | "error";
 
-type LogContext = {
+export type LogContext = {
   requestId?: string;
   route?: string;
   method?: string;
   userId?: string;
   role?: string;
   statusCode?: number;
-  [key: string]: string | number | boolean | null | undefined;
+  [key: string]: unknown;
 };
 
 function serialize(level: LogLevel, message: string, context?: LogContext) {
