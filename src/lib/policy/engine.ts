@@ -2,7 +2,7 @@ import { isWithinInterval } from "date-fns";
 import { normalizeDomain } from "@/lib/policy/domain";
 
 import type { AgentAction, DailyUsage, PolicyConfig, PolicyEvaluation, PolicyTrigger } from "@/lib/types/domain";
-import { toNearestStroops } from "@/lib/stellar/stroops";
+import { amountToStroops } from "@/lib/stellar/stroops";
 
 /** Raised when one policy rule list contains the same identifier twice. */
 export class DuplicateRuleError extends Error {
@@ -23,6 +23,36 @@ const RULE_LISTS: Array<keyof Pick<
   PolicyConfig,
   "allowedDomains" | "blockedDomains" | "allowedTools" | "blockedTools"
 >> = ["allowedDomains", "blockedDomains", "allowedTools", "blockedTools"];
+
+/** Reads a display amount as an exact stroop count, or null when it is not one. */
+export function readAmountStroops(value: number | string): bigint | null {
+  const parsed = amountToStroops(value);
+  return parsed.ok ? parsed.stroops : null;
+}
+
+/**
+ * Cap used for an allow decision. The stored stroop integer wins when it was
+ * written with the policy; otherwise the display amount is converted with the
+ * same helper. A value that is not an exact stroop count cannot allow a payment.
+ */
+export function readCapStroops(displayXlm: number, storedStroops?: string): bigint | null {
+  if (storedStroops !== undefined && /^\d+$/.test(storedStroops)) {
+    return BigInt(storedStroops);
+  }
+
+  return readAmountStroops(displayXlm);
+}
+
+/** True when the payment is not an exact stroop amount or is above the per-tx cap. */
+export function paymentExceedsPerTxCap(amount: number | string, policy: PolicyConfig): boolean {
+  const payment = readAmountStroops(amount);
+  const cap = readCapStroops(policy.perTxCapXLM, policy.perTxCapStroops);
+  if (payment === null || cap === null) {
+    return true;
+  }
+
+  return payment > cap;
+}
 
 /** Reject repeated identifiers within any single policy rule list. */
 export function validateNoDuplicateRules(policy: PolicyConfig): void {
@@ -95,13 +125,14 @@ export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage:
     });
   }
 
-  // Keep cap arithmetic in integer stroops so decimal XLM values do not drift.
-  const amountStroops = toNearestStroops(action.amountXLM);
-  const perTxCapStroops = toNearestStroops(policy.perTxCapXLM);
-  const dailyCapStroops = toNearestStroops(policy.dailyCapXLM);
-  const spentStroops = toNearestStroops(usage.spentXLM);
+  // Caps and payments are the same stroop integer. Display amounts are converted
+  // with the shared helper and are never scaled in floating point.
+  const amountStroops = readAmountStroops(action.amountXLM);
+  const perTxCapStroops = readCapStroops(policy.perTxCapXLM, policy.perTxCapStroops);
+  const dailyCapStroops = readCapStroops(policy.dailyCapXLM, policy.dailyCapStroops);
+  const spentStroops = readAmountStroops(usage.spentXLM);
 
-  if (amountStroops > perTxCapStroops) {
+  if (amountStroops === null || perTxCapStroops === null || amountStroops > perTxCapStroops) {
     triggers.push({
       code: "PER_TX_CAP_EXCEEDED",
       message: `Amount ${action.amountXLM} XLM exceeds per transaction cap (${policy.perTxCapXLM} XLM).`,
@@ -109,7 +140,12 @@ export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage:
     });
   }
 
-  if (spentStroops + amountStroops > dailyCapStroops) {
+  if (
+    amountStroops === null ||
+    spentStroops === null ||
+    dailyCapStroops === null ||
+    spentStroops + amountStroops > dailyCapStroops
+  ) {
     triggers.push({
       code: "DAILY_CAP_EXCEEDED",
       message: `Action would exceed daily budget (${policy.dailyCapXLM} XLM).`,

@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 
-import { defaultPolicyConfig, validateNoDuplicateRules } from "@/lib/policy/engine";
+import { defaultPolicyConfig, readAmountStroops, validateNoDuplicateRules } from "@/lib/policy/engine";
 import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { PolicyConfig } from "@/lib/types/domain";
@@ -124,6 +124,11 @@ async function readHistoryStore() {
   }
 }
 
+function stroopField(displayXlm: number): string | undefined {
+  const stroops = readAmountStroops(displayXlm);
+  return stroops === null ? undefined : stroops.toString();
+}
+
 export function normalizePolicy(policy?: Partial<PolicyConfig>): PolicyConfig {
   return {
     allowedDomains: policy?.allowedDomains ?? defaultPolicyConfig.allowedDomains,
@@ -132,6 +137,8 @@ export function normalizePolicy(policy?: Partial<PolicyConfig>): PolicyConfig {
     blockedTools: policy?.blockedTools ?? defaultPolicyConfig.blockedTools,
     perTxCapXLM: policy?.perTxCapXLM ?? defaultPolicyConfig.perTxCapXLM,
     dailyCapXLM: policy?.dailyCapXLM ?? defaultPolicyConfig.dailyCapXLM,
+    perTxCapStroops: stroopField(policy?.perTxCapXLM ?? defaultPolicyConfig.perTxCapXLM),
+    dailyCapStroops: stroopField(policy?.dailyCapXLM ?? defaultPolicyConfig.dailyCapXLM),
     maxToolCallsPerDay: policy?.maxToolCallsPerDay ?? defaultPolicyConfig.maxToolCallsPerDay,
     riskThreshold: policy?.riskThreshold ?? defaultPolicyConfig.riskThreshold,
     allowedHours: policy?.allowedHours ?? defaultPolicyConfig.allowedHours,

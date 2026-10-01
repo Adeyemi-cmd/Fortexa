@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { evaluateDecision } from "@/lib/decision/engine";
+import { decisionAmountStroops, evaluateDecision } from "@/lib/decision/engine";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import {
   getRequestLogContext,
@@ -125,13 +125,17 @@ export async function POST(request: NextRequest) {
       ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
       (body.paymentQuote || body.paymentQuoteInput)
         ? {
-            paymentQuote: buildPaymentQuoteFromDecision({
-              destination: (body.paymentQuote || body.paymentQuoteInput)!.destination,
-              amountXLM: action.amountXLM,
-              memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
-              actionId: action.id,
-              network: (body.paymentQuote || body.paymentQuoteInput)!.network,
-            }),
+            paymentQuote: (() => {
+              const quote = buildPaymentQuoteFromDecision({
+                destination: (body.paymentQuote || body.paymentQuoteInput)!.destination,
+                amountXLM: action.amountXLM,
+                memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
+                actionId: action.id,
+                network: (body.paymentQuote || body.paymentQuoteInput)!.network,
+              });
+              const amountStroops = decisionAmountStroops(action.amountXLM);
+              return amountStroops ? { ...quote, amountStroops } : quote;
+            })(),
           }
         : {}),
     };

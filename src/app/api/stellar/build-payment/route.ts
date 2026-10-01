@@ -6,7 +6,9 @@ import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/producti
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
+import { paymentExceedsPerTxCap } from "@/lib/policy/engine";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
+import { getPolicyConfig } from "@/lib/storage/policy-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
 import {
@@ -117,6 +119,17 @@ export async function POST(request: NextRequest) {
           field: verification.field,
         },
         { status: verification.status, headers: rateLimitHeaders(rate) },
+      );
+    }
+
+    const { policy } = await getPolicyConfig();
+    if (paymentExceedsPerTxCap(payload.amountXLM, policy)) {
+      return NextResponse.json(
+        {
+          error: "Payment amount exceeds the allowing policy cap.",
+          field: "amountXLM",
+        },
+        { status: 403, headers: rateLimitHeaders(rate) },
       );
     }
 

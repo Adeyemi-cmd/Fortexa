@@ -84,6 +84,8 @@ describe("policy migration fixtures — normalizePolicy", () => {
         blockedTools: defaultPolicyConfig.blockedTools,
         perTxCapXLM: defaultPolicyConfig.perTxCapXLM,
         dailyCapXLM: defaultPolicyConfig.dailyCapXLM,
+        perTxCapStroops: "1200000000",
+        dailyCapStroops: "3000000000",
         maxToolCallsPerDay: defaultPolicyConfig.maxToolCallsPerDay,
         riskThreshold: defaultPolicyConfig.riskThreshold,
         allowedHours: defaultPolicyConfig.allowedHours,

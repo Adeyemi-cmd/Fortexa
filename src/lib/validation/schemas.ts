@@ -1,10 +1,17 @@
 import { z } from "zod";
 
+import { parseXlmNumberToStroops } from "@/lib/stellar/stroops";
 import {
   isValidPaymentAmountNumber,
   isValidPaymentAmountString,
   PAYMENT_AMOUNT_ERROR,
 } from "@/lib/stellar/verify-payment-quote";
+
+const ASSET_DECIMAL_ERROR = "Amount has more decimal places than the asset allows.";
+
+function withinAssetDecimals(value: number): boolean {
+  return parseXlmNumberToStroops(value).ok;
+}
 
 export const IDEMPOTENCY_KEY_MIN = 8;
 export const IDEMPOTENCY_KEY_MAX = 255;
@@ -147,8 +154,14 @@ export const policyConfigSchema = z.object({
   blockedDomains: z.array(z.string().min(3)).min(1),
   allowedTools: z.array(z.string().min(1)).min(1),
   blockedTools: z.array(z.string().min(1)).min(1),
-  perTxCapXLM: z.number().positive().max(1_000_000),
-  dailyCapXLM: z.number().positive().max(1_000_000),
+  perTxCapXLM: z.number().positive().max(1_000_000).refine(withinAssetDecimals, {
+    message: ASSET_DECIMAL_ERROR,
+  }),
+  dailyCapXLM: z.number().positive().max(1_000_000).refine(withinAssetDecimals, {
+    message: ASSET_DECIMAL_ERROR,
+  }),
+  perTxCapStroops: z.string().regex(/^\d+$/).optional(),
+  dailyCapStroops: z.string().regex(/^\d+$/).optional(),
   maxToolCallsPerDay: z.number().int().positive().max(10_000),
   riskThreshold: z.number().int().min(1).max(100),
   allowedHours: z.object({

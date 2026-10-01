@@ -270,4 +270,24 @@ describe("/api/policy route", () => {
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toBe("Invalid policy payload.");
   });
+
+  it("rejects a cap with more fractional digits than the asset allows", async () => {
+    const cookie = operatorCookie();
+    const response = await POST(
+      makePolicyPostRequest(cookie, {
+        ...POLICY_PAYLOAD,
+        perTxCapXLM: 1.12345678,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as {
+      error: string;
+      details?: { fieldErrors?: { perTxCapXLM?: string[] } };
+    };
+    expect(payload.error).toBe("Invalid policy payload.");
+    expect(payload.details?.fieldErrors?.perTxCapXLM).toContain(
+      "Amount has more decimal places than the asset allows.",
+    );
+  });
 });
