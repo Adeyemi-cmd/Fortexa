@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
-import { buildSecurityHeaders } from "@/lib/security/headers";
+import { applySecurityHeaders } from "@/lib/security/headers";
 
 const PROTECTED_PREFIXES = [
   "/dashboard",
@@ -46,17 +46,9 @@ export function proxy(request: NextRequest) {
   const response = NextResponse.next();
   const requestId = request.headers.get("x-request-id") || crypto.randomUUID();
 
-  response.headers.set("x-request-id", requestId);
-  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
-  response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
-  response.headers.set("Cross-Origin-Resource-Policy", "same-origin");
-
-  const securityHeaders = buildSecurityHeaders();
-  for (const [key, value] of Object.entries(securityHeaders)) {
-    response.headers.set(key, value);
-  }
-
-  return response;
+  // Share the exact same header writer as the auth/payment route handlers so
+  // page and API responses never drift apart.
+  return applySecurityHeaders(response, requestId);
 }
 
 export const config = {

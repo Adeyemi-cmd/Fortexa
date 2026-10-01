@@ -23,23 +23,34 @@ export function isValidWalletPublicKey(publicKey: string) {
   return STELLAR_PUBLIC_KEY.test(normalizeWalletPublicKey(publicKey));
 }
 
-export function resolveRoleByWallet(publicKey: string): AuthRole | null {
+export function resolveRolesByWallet(publicKey: string): AuthRole[] {
   const normalizedKey = normalizeWalletPublicKey(publicKey);
 
   const operatorWallets = parseWalletList(process.env.FORTEXA_OPERATOR_WALLETS);
+  const signerWallets = parseWalletList(process.env.FORTEXA_SIGNER_WALLETS);
   const viewerWallets = parseWalletList(process.env.FORTEXA_VIEWER_WALLETS);
+  const roles: AuthRole[] = [];
 
   if (operatorWallets.has(normalizedKey)) {
-    return "operator";
+    roles.push("operator");
+  }
+
+  if (signerWallets.has(normalizedKey)) {
+    roles.push("signer");
   }
 
   if (viewerWallets.has(normalizedKey)) {
-    return "viewer";
+    roles.push("viewer");
   }
 
-  if (operatorWallets.size === 0 && viewerWallets.size === 0) {
-    return "operator";
+  if (operatorWallets.size === 0 && signerWallets.size === 0 && viewerWallets.size === 0) {
+    return ["operator"];
   }
 
-  return null;
+  return roles;
+}
+
+export function resolveRoleByWallet(publicKey: string): AuthRole | null {
+  const roles = resolveRolesByWallet(publicKey);
+  return roles.includes("operator") ? "operator" : roles[0] ?? null;
 }

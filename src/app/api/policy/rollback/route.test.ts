@@ -3,6 +3,11 @@ import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { POST } from "@/app/api/policy/rollback/route";
+import { updatePolicyConfig } from "@/lib/storage/policy-store";
+import { appendAuditEntry, resetAuditState } from "@/lib/storage/audit-store";
+import { putIdempotencyRecord, resetSubmitIdempotencyState } from "@/lib/storage/submit-idempotency-store";
+import { defaultPolicyConfig } from "@/lib/policy/engine";
+import { randomUUID } from "node:crypto";
 
 function operatorCookie() {
   process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
@@ -10,6 +15,18 @@ function operatorCookie() {
     email: "operator@fortexa.local",
     role: "operator",
     userId: "policy-rollback-operator",
+    expiresInSeconds: 120,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
+function signerCookie() {
+  process.env.FORTEXA_AUTH_SECRET = "integration-test-secret";
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: "policy-rollback-signer",
     expiresInSeconds: 120,
   });
 
@@ -40,5 +57,19 @@ describe("/api/policy/rollback route", () => {
 
     const response = await POST(request);
     expect(response.status).toBe(200);
+  });
+
+  it("rejects signer-only rollback", async () => {
+    const request = new NextRequest("http://localhost/api/policy/rollback", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: signerCookie(),
+      },
+      body: JSON.stringify({ targetVersion: 1 }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(403);
   });
 });

@@ -8,6 +8,8 @@ function normalizeEnvValue(value: string | undefined) {
   return trimmed && trimmed.length > 0 ? trimmed : null;
 }
 
+type NetworkEnv = Record<string, string | undefined>;
+
 export function getStellarNetworkPassphrase(
   env: Record<string, string | undefined> = process.env
 ) {
