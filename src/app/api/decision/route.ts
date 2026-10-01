@@ -13,6 +13,7 @@ import {
   logInfo,
   logWarn,
 } from "@/lib/observability/logger";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
 import { redactSensitiveFields } from "@/lib/observability/redact";
 import { demoScenarios } from "@/lib/scenarios/seed";
@@ -87,17 +88,17 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
-    const assignedWallet = await getUserWallet(userId);
-    if (!assignedWallet || "expired" in assignedWallet) {
-      return jsonWithRequestContext(request, {
-        route: "/api/decision",
-        startedAtMs,
-        status: 401,
-        body: { error: "No active wallet mapping found for this user." },
-        headers: rateLimitHeaders(rate),
-      });
+const notReady = await readinessBlockResponse(
+      request,
+      "/api/decision",
+      startedAtMs,
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      logWarn("Decision route blocked: not ready", { ...context, userId });
+      return notReady;
     }
-
+    const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {

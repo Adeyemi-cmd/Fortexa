@@ -8,6 +8,8 @@ import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observab
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { redactSensitiveFields } from "@/lib/observability/redact";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { decodeSignedXdrSourceAccount, submitSignedTransactionXdr } from "@/lib/stellar/client";
 import { assertStellarNetworkConfig } from "@/lib/stellar/network-config";
@@ -211,7 +213,28 @@ export async function POST(request: NextRequest) {
         headers: rateLimitHeaders(rate),
       });
     }
-
+    
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/build-payment",
+      Date.now(),
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      return notReady;
+    }
+     
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/submit-signed",
+      startedAtMs,
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      logWarn("Submit signed blocked: not ready", context);
+      return notReady;
+    }
+    
     const userId = auth.session.userId;
 
     if (!bodyResult.ok) {

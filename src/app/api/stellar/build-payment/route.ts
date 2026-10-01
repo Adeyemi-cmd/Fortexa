@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { securityHeadersForRequest } from "@/lib/security/headers";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
@@ -58,7 +59,15 @@ export async function POST(request: NextRequest) {
         { status: 503, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
-
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/build-payment",
+      Date.now(),
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      return notReady;
+    }
     const userId = auth.session.userId;
     const assignedWallet = await getUserWallet(userId);
 
