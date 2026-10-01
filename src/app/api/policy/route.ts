@@ -13,6 +13,8 @@ import { parsePolicyImport, policyImportMatchesActive } from "@/lib/policy/impor
 import { getPolicyConfig, PolicyVersionConflict, updatePolicyConfig } from "@/lib/storage/policy-store";
 import { policyConfigSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { hasSensitiveField } from "@/lib/settings/save-safety";
+import { getStellarNetworkFingerprint, resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -109,51 +111,29 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (typeof bodyResult.data === "object" && bodyResult.data !== null &&
-        "format" in bodyResult.data) {
-      const imported = parsePolicyImport(bodyResult.data);
-      if (!imported.ok) {
-        return jsonWithRequestContext(request, {
-          route: "/api/policy",
-          startedAtMs,
-          status: 422,
-          body: { error: imported.error },
-          headers: rateLimitHeaders(rate),
-        });
-      }
-
-      validateNoDuplicateRules(imported.document.policy);
-      const active = await getPolicyConfig();
-      const mismatch = policyImportMatchesActive(imported.document, active);
-      if (mismatch) {
-        return jsonWithRequestContext(request, {
-          route: "/api/policy",
-          startedAtMs,
-          status: imported.document.version !== active.version ? 409 : 422,
-          body: { error: mismatch },
-          headers: rateLimitHeaders(rate),
-        });
-      }
-
-      // Importing an unchanged export is a round trip, not a new policy revision.
-      if (JSON.stringify(imported.document.policy) === JSON.stringify(active.policy)) {
-        return jsonWithRequestContext(request, {
-          route: "/api/policy",
-          startedAtMs,
-          status: 200,
-          body: active,
-          headers: rateLimitHeaders(rate),
-        });
-      }
-
-      const updated = await updatePolicyConfig(imported.document.policy, auth.session.userId, {
-        expectedVersion: imported.document.version,
-      });
+    if (hasSensitiveField(bodyResult.data)) {
       return jsonWithRequestContext(request, {
         route: "/api/policy",
         startedAtMs,
-        status: 200,
-        body: updated,
+        status: 400,
+        body: { error: "Policy payload contains a sensitive field." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const expectedNetwork = request.headers.get("x-fortexa-network-fingerprint");
+    if (
+      !resolveStellarNetworkConfig().ok ||
+      (expectedNetwork !== null && expectedNetwork !== getStellarNetworkFingerprint())
+    ) {
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 409,
+        body: {
+          error: "Server network configuration is mismatched; saving is disabled.",
+          code: "NETWORK_MISMATCH",
+        },
         headers: rateLimitHeaders(rate),
       });
     }

@@ -59,17 +59,29 @@ describe("/api/policy/rollback route", () => {
     expect(response.status).toBe(200);
   });
 
-  it("rejects signer-only rollback", async () => {
+  it("rejects a rollback payload carrying a session token", async () => {
+    const request = new NextRequest("http://localhost/api/policy/rollback", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: operatorCookie() },
+      body: JSON.stringify({ targetVersion: 1, sessionToken: "fixture-token" }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects rollback from a stale settings page", async () => {
     const request = new NextRequest("http://localhost/api/policy/rollback", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie: signerCookie(),
+        cookie: operatorCookie(),
+        "x-fortexa-network-fingerprint": "stale",
       },
       body: JSON.stringify({ targetVersion: 1 }),
     });
 
     const response = await POST(request);
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(409);
   });
 });

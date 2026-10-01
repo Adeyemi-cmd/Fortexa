@@ -7,6 +7,13 @@ import { ScenariosCatalog } from "@/components/scenarios-catalog";
 import { TabNav, type TabItem } from "@/components/ui/tab-nav";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
+import {
+  getStellarHorizonUrl,
+  getStellarNetworkFingerprint,
+  getStellarNetworkPassphrase,
+  inferStellarNetworkProfile,
+  resolveStellarNetworkConfig,
+} from "@/lib/stellar/network-config";
 import { listAuditEntries } from "@/lib/storage/audit-store";
 
 const tabs: TabItem[] = [
@@ -30,13 +37,50 @@ export default async function SettingsPage({
   const session = sessionToken ? verifySessionToken(sessionToken) : null;
   const userId = session?.userId;
   const entries = userId ? await listAuditEntries(userId) : [];
+  const network = resolveStellarNetworkConfig();
+  const horizonUrl = getStellarHorizonUrl();
+  const networkPassphrase = getStellarNetworkPassphrase();
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       <TabNav tabs={tabs} activeTab={activeTab} />
 
-      {activeTab === "policies" ? <PolicyEditor /> : null}
-      {activeTab === "wallet" ? <WalletStatusCard /> : null}
+      <section className="surface-elevated p-6" aria-label="Server network configuration">
+        <h2 className="text-lg font-semibold">Server network</h2>
+        <p className="mt-2 text-sm">Network: {inferStellarNetworkProfile(horizonUrl)}</p>
+        <p className="text-sm">Network passphrase: {networkPassphrase}</p>
+        <p className="text-sm">Configuration valid: {network.ok ? "yes" : "no"}</p>
+        {!network.ok ? (
+          <p role="alert" className="mt-2 text-sm text-red-400">
+            Network mismatch: server Horizon and passphrase disagree. Saving is disabled.
+          </p>
+        ) : null}
+      </section>
+
+      {activeTab === "policies" ? (
+        <PolicyEditor networkMatches={network.ok} networkFingerprint={getStellarNetworkFingerprint()} />
+      ) : null}
+      {activeTab === "wallet" ? (
+        <div className="space-y-6">
+          <WalletStatusCard />
+          <div className="surface-elevated p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-sm font-medium uppercase tracking-wider text-[hsl(var(--muted-foreground))]">
+                Recent Activity
+              </h3>
+            </div>
+            {entries.length > 0 ? (
+              <ActivityTimeline entries={entries} compact />
+            ) : (
+              <div className="rounded-xl border border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.2)] p-8 text-center">
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">
+                  No visible activity for this wallet yet.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : null}
       {activeTab === "scenarios" ? <ScenariosCatalog /> : null}
       {activeTab === "ops" ? <OpsDashboard /> : null}
       {activeTab === "activity" ? <ActivityTimeline entries={entries} /> : null}

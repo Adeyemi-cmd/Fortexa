@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
-import { securityHeadersForRequest } from "@/lib/security/headers";
 import { getNativeBalance } from "@/lib/stellar/client";
+import { resolveStellarNetworkConfig } from "@/lib/stellar/network-config";
 import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 
 export async function GET(request: NextRequest) {
@@ -14,6 +14,8 @@ export async function GET(request: NextRequest) {
   }
 
   const userId = auth.session.userId;
+  const networkConfig = resolveStellarNetworkConfig();
+  const network = networkConfig.ok ? networkConfig.profile : "mismatch";
   let assignedWallet = await getUserWallet(userId);
 
   if (assignedWallet && "expired" in assignedWallet) {
@@ -54,7 +56,7 @@ export async function GET(request: NextRequest) {
       {
         configured: false,
         userId,
-        network: "stellar-testnet",
+        network,
         message: "Link your Stellar wallet address to continue with real on-chain transactions.",
       },
       { status: 200, headers: securityHeadersForRequest(request) }
@@ -68,7 +70,7 @@ export async function GET(request: NextRequest) {
       userId,
       source: assignedWallet.source,
       provider: assignedWallet.provider ?? "unknown",
-      network: "stellar-testnet",
+      network,
       publicKey,
       balance,
     }, { headers: securityHeadersForRequest(request) });
@@ -79,7 +81,7 @@ export async function GET(request: NextRequest) {
         userId,
         source: assignedWallet.source,
         provider: assignedWallet.provider ?? "unknown",
-        network: "stellar-testnet",
+        network,
         publicKey,
         error: error instanceof Error ? error.message : "Failed to load balance.",
       },
