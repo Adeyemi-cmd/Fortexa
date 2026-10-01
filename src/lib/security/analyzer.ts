@@ -189,7 +189,7 @@ async function fetchBlocklistWithTimeout(): Promise<{
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === "AbortError";
     const health = getBlocklistHealth();
-    const blocklist: string[] = [];
+    const blocklist = [];
     return { 
       blocklist, 
       status: { 

@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/read-json-body";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
@@ -64,7 +65,18 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const rawBody = (await request.json().catch(() => ({}))) as unknown;
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) {
+      logWarn("Auth login payload too large", context);
+      return jsonWithRequestContext(request, {
+        route: "/api/auth/login",
+        startedAtMs,
+        status: bodyResult.status,
+        body: { error: bodyResult.error },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+    const rawBody = bodyResult.data;
     const parsed = loginSchema.safeParse(rawBody);
 
     if (!parsed.success) {

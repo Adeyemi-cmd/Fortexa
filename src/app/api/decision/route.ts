@@ -1,3 +1,4 @@
+import { readJsonBody } from "@/lib/http/read-json-body";
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 
@@ -88,17 +89,18 @@ export async function POST(request: NextRequest) {
     }
 
     const userId = auth.session.userId;
-const notReady = await readinessBlockResponse(
-      request,
-      "/api/decision",
-      startedAtMs,
-      rateLimitHeaders(rate),
-    );
-    if (notReady) {
-      logWarn("Decision route blocked: not ready", { ...context, userId });
-      return notReady;
+
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) {
+      logWarn("Decision payload too large", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/decision",
+        startedAtMs,
+        status: 413,
+        body: { error: bodyResult.error },
+      });
     }
-    const rawBody = (await request.json().catch(() => ({}))) as unknown;
+    const rawBody = bodyResult.data;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
