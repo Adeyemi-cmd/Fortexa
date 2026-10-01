@@ -264,7 +264,9 @@ describe("evaluateSecurity", () => {
 
       const result = await evaluateSecurity(makeAction());
 
-      expect(result.analyzerStatus.blocklistStatus).toBe("timeout");
+      // Timeouts surface as an error status with the dedicated timeout flag
+      // (see commit "propagate blocklist fetch errors and fix secret-targeting regex").
+      expect(result.analyzerStatus.blocklistStatus).toBe("error");
       expect(result.analyzerStatus.blocklistTimedOut).toBe(true);
       expect(result.analyzerStatus.isDegraded).toBe(true);
     });

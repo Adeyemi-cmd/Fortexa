@@ -170,40 +170,55 @@ async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: BlocklistFetchStatus;
 }> {
-  if (!process.env.FORTEXA_BLOCKLIST_URL) {
-    return { blocklist: [], status: { blocked: false, timedOut: false } };
-  }
-
-  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const { blocklistTimeoutMs } = getAnalyzerConfig();
 
   try {
-    const blocklist = await fetchBlocklist();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), blocklistTimeoutMs);
+
+    try {
+      const blocklist = await fetchBlocklist();
+      clearTimeout(timeoutId);
+      const health = getBlocklistHealth();
+      if (health.lastError) {
+        return {
+          blocklist,
+          status: {
+            blocked: true,
+            timedOut: false,
+            error: health.lastError,
+          },
+        };
+      }
+      return { blocklist, status: { blocked: false, timedOut: false } };
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (err) {
+    const isTimeout = err instanceof Error && err.name === "AbortError";
+
+    // fetchBlocklist swallows errors internally, so check health for failures
     const health = getBlocklistHealth();
-    if (health.lastError) {
+    if (health.configured && health.lastError) {
+      const healthTimedOut = /abort|timeout/i.test(health.lastError);
       return {
-        blocklist,
-        status: { blocked: true, timedOut: false, error: health.lastError },
+        blocklist: [],
+        status: {
+          blocked: true,
+          timedOut: healthTimedOut,
+          error: health.lastError,
+        },
       };
     }
-    return { blocklist, status: { blocked: false, timedOut: false } };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown fetch error";
-    const health = getBlocklistHealth();
-    const timedOut =
-      (err instanceof Error && err.name === "AbortError") ||
-      /abort|timeout/i.test(health.lastError ?? message);
+
     return {
       blocklist: [],
       status: {
         blocked: true,
-        timedOut,
-        error: health.lastError ?? message,
+        timedOut: isTimeout,
+        error: err instanceof Error ? err.message : "Unknown error",
       },
     };
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 

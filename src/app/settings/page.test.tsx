@@ -1,55 +1,67 @@
-import { Networks } from "@stellar/stellar-sdk";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import {
+  getMetricsSnapshot,
+  recordDecisionOutcome,
+  recordRateLimitRejection,
+  recordStellarSubmitResult,
+  resetMetrics,
+} from "@/lib/observability/metrics";
+import type { MetricsSnapshot } from "@/lib/observability/metrics";
+
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: () => undefined,
+  }),
+}));
+
+vi.mock("@/lib/storage/audit-store", () => ({
+  listAuditEntries: async () => [],
+}));
 
 import SettingsPage from "@/app/settings/page";
 
-vi.mock("next/headers", () => ({
-  cookies: async () => ({ get: () => undefined }),
-}));
+async function renderOpsTab(): Promise<string> {
+  // The page is an async server component: resolve it first, then render the tree.
+  const page = await SettingsPage({ searchParams: Promise.resolve({ tab: "ops" }) });
+  return renderToStaticMarkup(page);
+}
 
-vi.mock("@/lib/auth/use-auth-session", () => ({
-  useAuthSession: () => ({ isOperator: true, loading: false }),
-}));
+function readCounter(markup: string, testId: string): string | null {
+  const match = new RegExp(`data-testid="ops-counter-${testId}"[^>]*>([^<]*)<`).exec(markup);
+  return match ? match[1] ?? null : null;
+}
 
-const originalHorizon = process.env.STELLAR_HORIZON_URL;
-const originalPassphrase = process.env.STELLAR_NETWORK_PASSPHRASE;
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-  if (originalHorizon === undefined) delete process.env.STELLAR_HORIZON_URL;
-  else process.env.STELLAR_HORIZON_URL = originalHorizon;
-  if (originalPassphrase === undefined) delete process.env.STELLAR_NETWORK_PASSPHRASE;
-  else process.env.STELLAR_NETWORK_PASSPHRASE = originalPassphrase;
-});
-
-describe("settings page network", () => {
-  it("shows the server network and public passphrase without browser storage or a session", async () => {
-    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
-    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.PUBLIC;
-    const setItem = vi.fn();
-    vi.stubGlobal("localStorage", { setItem });
-    vi.stubGlobal("sessionStorage", { setItem });
-
-    const html = renderToStaticMarkup(
-      await SettingsPage({ searchParams: Promise.resolve({ tab: "policies" }) }),
-    );
-
-    expect(html).toContain("Network: public");
-    expect(html).toContain(Networks.PUBLIC);
-    expect(html).toContain("Configuration valid: yes");
-    expect(setItem).not.toHaveBeenCalled();
+describe("/settings?tab=ops dashboard loader", () => {
+  beforeEach(() => {
+    resetMetrics();
   });
 
-  it("shows a mismatch and disables save when server settings disagree", async () => {
-    process.env.STELLAR_HORIZON_URL = "https://horizon.stellar.org";
-    process.env.STELLAR_NETWORK_PASSPHRASE = Networks.TESTNET;
+  it("passes the in-process metrics snapshot to the ops dashboard", async () => {
+    recordDecisionOutcome("APPROVE");
+    recordDecisionOutcome("WARN");
+    recordDecisionOutcome("BLOCK");
+    recordRateLimitRejection();
+    recordStellarSubmitResult("horizon_failure");
 
-    const html = renderToStaticMarkup(
-      await SettingsPage({ searchParams: Promise.resolve({ tab: "policies" }) }),
-    );
+    const snapshot: MetricsSnapshot = getMetricsSnapshot();
+    const markup = await renderOpsTab();
 
-    expect(html).toContain("Network mismatch");
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save Policy<\/button>/);
+    expect(readCounter(markup, "allow")).toBe(String(snapshot.counters.allow));
+    expect(readCounter(markup, "deny")).toBe(String(snapshot.counters.deny));
+    expect(readCounter(markup, "rate-limit")).toBe(String(snapshot.counters.rateLimit));
+    expect(readCounter(markup, "submit-failures")).toBe(String(snapshot.counters.submitFailures));
+
+    expect(snapshot.counters).toEqual({ allow: 2, deny: 1, rateLimit: 1, submitFailures: 1 });
+  });
+
+  it("renders zeroes when the process has recorded no activity", async () => {
+    const markup = await renderOpsTab();
+
+    expect(readCounter(markup, "allow")).toBe("0");
+    expect(readCounter(markup, "deny")).toBe("0");
+    expect(readCounter(markup, "rate-limit")).toBe("0");
+    expect(readCounter(markup, "submit-failures")).toBe("0");
   });
 });

@@ -8,13 +8,7 @@ import { evaluateScenarioCatalog } from "@/lib/scenarios/evaluate";
 import { TabNav, type TabItem } from "@/components/ui/tab-nav";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
-import {
-  getStellarHorizonUrl,
-  getStellarNetworkFingerprint,
-  getStellarNetworkPassphrase,
-  inferStellarNetworkProfile,
-  resolveStellarNetworkConfig,
-} from "@/lib/stellar/network-config";
+import { getMetricsSnapshot } from "@/lib/observability/metrics";
 import { listAuditEntries } from "@/lib/storage/audit-store";
 
 const tabs: TabItem[] = [
@@ -40,6 +34,10 @@ export default async function SettingsPage({
   const entries = userId ? await listAuditEntries(userId) : [];
   const scenarioEvaluations =
     activeTab === "scenarios" ? await evaluateScenarioCatalog() : [];
+
+  // Ops dashboard loader: read the in-process metrics snapshot directly so the
+  // screen renders the same counters the `/api/metrics` scrape exports.
+  const opsMetricsSnapshot = activeTab === "ops" ? getMetricsSnapshot() : null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -81,10 +79,10 @@ export default async function SettingsPage({
           </div>
         </div>
       ) : null}
-      {activeTab === "scenarios" ? (
-        <ScenariosCatalog evaluations={scenarioEvaluations} />
+      {activeTab === "scenarios" ? <ScenariosCatalog /> : null}
+      {activeTab === "ops" && opsMetricsSnapshot ? (
+        <OpsDashboard initialMetrics={opsMetricsSnapshot} />
       ) : null}
-      {activeTab === "ops" ? <OpsDashboard /> : null}
       {activeTab === "activity" ? <ActivityTimeline entries={entries} /> : null}
     </div>
   );

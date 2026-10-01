@@ -525,6 +525,7 @@ or `signedXdr` strings.
 - Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`, plus `ready`, `checks`, and `failingChecks` (`production_config`, `storage`, `horizon`). The dashboard shows its pay, fund, and policy actions only while `ready` is `true`.
 - Metrics endpoint: `GET /api/metrics` + Prometheus format
 - `/ops` dashboard shows:
+  - allow / deny / rate-limit / submit-failure counters, read from the same in-process metrics snapshot that `GET /api/metrics` exports (zeroes when nothing has been recorded yet)
   - service health
   - total requests
   - error rate

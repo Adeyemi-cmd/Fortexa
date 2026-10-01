@@ -62,12 +62,9 @@ export function logValidationFailure(
   error: ZodError,
   rawBody?: unknown,
 ): void {
-  logWarn(
-    message,
-    redactSensitiveFields({
-      ...context,
-      validation: error.flatten() as unknown as Record<string, unknown>,
-      body: rawBody,
-    }) as unknown as LogContext,
-  );
+  logWarn(message, redactSensitiveFields({
+    ...context,
+    validation: error.flatten(),
+    body: rawBody,
+  }));
 }
