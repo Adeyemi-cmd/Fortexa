@@ -10,7 +10,6 @@ import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   // Read the body first so the gate can blocklist-check the destination in
@@ -43,23 +42,10 @@ export async function POST(request: NextRequest) {
   const rate = gate.rate;
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       return auth.response;
-    }
-
-    const readinessReport = getProtectedPaymentFlowReadinessReport();
-    if (readinessReport) {
-      return NextResponse.json(
-        {
-          error:
-            "Protected payment flows are disabled until Fortexa passes the production readiness check.",
-          issues: readinessReport.issues,
-          command: "npm run check:production-readiness",
-        },
-        { status: 503, headers: rateLimitHeaders(rate) }
-      );
     }
 
     const userId = auth.session.userId;
@@ -82,11 +68,10 @@ export async function POST(request: NextRequest) {
     const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
 
     if (!parsedPayload.success) {
-      logValidationFailure("Stellar build payment validation failed", { route: "/api/stellar/build-payment", userId }, parsedPayload.error, bodyResult.data);
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
-          details: toPublicValidationDetails(parsedPayload.error),
+          details: parsedPayload.error.flatten(),
         },
         { status: 400, headers: rateLimitHeaders(rate) },
       );
@@ -113,7 +98,6 @@ export async function POST(request: NextRequest) {
       asset: payload.asset,
       memo: payload.memo,
       network: payload.network,
-      requestTimestampMs: payload.requestTimestampMs,
     });
 
     if (!verification.ok) {

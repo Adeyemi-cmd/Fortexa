@@ -36,27 +36,7 @@ export default async function SettingsPage({
       <TabNav tabs={tabs} activeTab={activeTab} />
 
       {activeTab === "policies" ? <PolicyEditor /> : null}
-      {activeTab === "wallet" ? (
-        <div className="space-y-6">
-          <WalletStatusCard />
-          <div className="surface-elevated p-6">
-            <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-medium uppercase tracking-wider text-[hsl(var(--muted-foreground))]">
-                Recent Activity
-              </h3>
-            </div>
-            {entries.length > 0 ? (
-              <ActivityTimeline entries={entries} compact />
-            ) : (
-              <div className="rounded-xl border border-dashed border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.2)] p-8 text-center">
-                <p className="text-sm text-[hsl(var(--muted-foreground))]">
-                  No visible activity for this wallet yet.
-                </p>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : null}
+      {activeTab === "wallet" ? <WalletStatusCard /> : null}
       {activeTab === "scenarios" ? <ScenariosCatalog /> : null}
       {activeTab === "ops" ? <OpsDashboard /> : null}
       {activeTab === "activity" ? <ActivityTimeline entries={entries} /> : null}
