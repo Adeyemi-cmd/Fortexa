@@ -36,6 +36,9 @@ describe("/api/auth/refresh route", () => {
     const response = await POST(request);
 
     expect(response.status).toBe(401);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
   });
 
   it("returns 200 and rotates for authenticated user", async () => {
@@ -55,6 +58,11 @@ describe("/api/auth/refresh route", () => {
     expect(payload.ok).toBe(true);
     expect(payload.user.userId).toBe("refresh-operator");
     expect(payload.user.role).toBe("operator");
+
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("does not issue a session while the account is locked out", async () => {

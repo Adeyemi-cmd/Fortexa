@@ -131,8 +131,9 @@ describe("/api/auth/login challenge-signature flow", () => {
     );
 
     expect(response.status).toBe(400);
-    const payload = (await response.json()) as { error: string };
+    const payload = (await response.json()) as { error: string; code: string };
     expect(payload.error).toContain("expired");
+    expect(payload.code).toBe("expired");
   });
 
   it("rejects unauthorized wallets after signature verification", async () => {
@@ -334,5 +335,54 @@ describe("/api/auth/login validation redaction", () => {
     const payload = JSON.parse(raw) as { error: string; details?: unknown };
     expect(payload.error).toBe("Invalid login payload.");
     expect(payload.details).toBeDefined();
+  });
+});
+
+describe("/api/auth/login security headers", () => {
+  afterEach(async () => {
+    delete process.env.FORTEXA_OPERATOR_WALLETS;
+    await resetWalletChallengeStore();
+    await resetLoginLockoutStore();
+  });
+
+  it("carries the security header set on success and is not cacheable", async () => {
+    process.env.FORTEXA_AUTH_SECRET = "login-route-test-secret";
+    process.env.FORTEXA_OPERATOR_WALLETS = AUTHORIZED_PUBLIC_KEY;
+
+    const challenge = await issueChallenge(AUTHORIZED_PUBLIC_KEY);
+    const signature = signSep53Message(AUTHORIZED_SECRET, challenge.message);
+
+    const response = await login(
+      new NextRequest("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          publicKey: AUTHORIZED_PUBLIC_KEY,
+          challengeId: challenge.challengeId,
+          signature,
+        }),
+      })
+    );
+
+    expect(response.status).toBe(200);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("carries the security header set on validation errors", async () => {
+    const response = await login(
+      new NextRequest("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "bad", challengeId: "bad", signature: "bad" }),
+      })
+    );
+
+    expect(response.status).toBe(400);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Loader2,
   Sparkles,
@@ -138,6 +138,13 @@ export function DecisionConsole() {
     Number.isFinite(parsedExecuteAmount) && parsedExecuteAmount > 0 ? parsedExecuteAmount : evaluatedAmount;
   const destinationPreview = destination.trim().toUpperCase();
 
+  useEffect(() => {
+    if (step === 4 && evaluatedAmount != null && !executeAmount) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the prefill of a user-editable amount field
+      setExecuteAmount(String(evaluatedAmount));
+    }
+  }, [step, evaluatedAmount, executeAmount]);
+
   function resetPreparedXdr() {
     setUnsignedXdr("");
     setSignedXdrInput("");
@@ -237,11 +244,7 @@ export function DecisionConsole() {
       setAuthorizedAuditEntryId(payload.auditEntry.id);
       setMessage("Decision recorded in audit trail.");
       pushToast("success", "Evaluation complete.");
-      const nextStep = payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4;
-      if (nextStep === 4 && evaluatedAmount != null && !executeAmount) {
-        setExecuteAmount(String(evaluatedAmount));
-      }
-      setStep(nextStep);
+      setStep(payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4);
     } catch (error) {
       const err = error instanceof Error ? error.message : "Unexpected failure.";
       setMessage(err);

@@ -135,6 +135,8 @@ export function normalizePolicy(policy?: Partial<PolicyConfig>): PolicyConfig {
     maxToolCallsPerDay: policy?.maxToolCallsPerDay ?? defaultPolicyConfig.maxToolCallsPerDay,
     riskThreshold: policy?.riskThreshold ?? defaultPolicyConfig.riskThreshold,
     allowedHours: policy?.allowedHours ?? defaultPolicyConfig.allowedHours,
+    memoRequiredDestinations:
+      policy?.memoRequiredDestinations ?? defaultPolicyConfig.memoRequiredDestinations ?? [],
   };
 }
 

@@ -10,9 +10,9 @@ vi.mock("@/lib/stellar/client", () => ({
   }),
 }));
 
-const mockRunWithDatabase = vi.fn();
+const mockGetDatabaseMigrationStatus = vi.fn();
 vi.mock("@/lib/storage/db", () => ({
-  runWithDatabase: (...args: unknown[]) => mockRunWithDatabase(...args),
+  getDatabaseMigrationStatus: (...args: unknown[]) => mockGetDatabaseMigrationStatus(...args),
 }));
 
 const mockGetBlocklistHealth = vi.fn();
@@ -23,6 +23,12 @@ vi.mock("@/lib/security/blocklist", () => ({
 describe("GET /api/health", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetDatabaseMigrationStatus.mockResolvedValue({
+      configured: false,
+      ready: true,
+      appliedId: null,
+      expectedId: "004_wallet_expiration",
+    });
     delete process.env.GROQ_API_KEY;
     delete process.env.FORTEXA_AUTH_SECRET;
     delete process.env.STELLAR_HORIZON_URL;
@@ -32,7 +38,12 @@ describe("GET /api/health", () => {
     process.env.GROQ_API_KEY = "test-key";
     process.env.STELLAR_HORIZON_URL = "https://horizon.example.com";
 
-    mockRunWithDatabase.mockResolvedValue({ available: true });
+    mockGetDatabaseMigrationStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      appliedId: "004_wallet_expiration",
+      expectedId: "004_wallet_expiration",
+    });
     mockRoot.mockResolvedValue({});
     mockGetBlocklistHealth.mockReturnValue({
       configured: true,
@@ -56,7 +67,12 @@ describe("GET /api/health", () => {
   it("returns degraded states when dependencies fail or have errors", async () => {
     process.env.STELLAR_HORIZON_URL = "https://horizon.example.com";
 
-    mockRunWithDatabase.mockResolvedValue({ available: false });
+    mockGetDatabaseMigrationStatus.mockResolvedValue({
+      configured: true,
+      ready: false,
+      appliedId: "003_submit_idempotency",
+      expectedId: "004_wallet_expiration",
+    });
     mockRoot.mockRejectedValue(new Error("Timeout"));
     mockGetBlocklistHealth.mockReturnValue({
       configured: true,
@@ -69,15 +85,15 @@ describe("GET /api/health", () => {
     const response = await GET(req);
     const json = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(json.ok).toBe(true);
-    expect(json.dependencies.storage).toBe("degraded");
+    expect(response.status).toBe(503);
+    expect(json.ok).toBe(false);
+    expect(json.dependencies.storage).toBe("not_ready");
+    expect(json.migrations.appliedId).toBe("003_submit_idempotency");
     expect(json.dependencies.horizon).toBe("degraded");
     expect(json.dependencies.blocklist).toBe("degraded");
   });
 
   it("returns unconfigured/unknown states when optional dependencies are missing", async () => {
-    mockRunWithDatabase.mockResolvedValue({ available: false });
     mockGetBlocklistHealth.mockReturnValue({
       configured: false,
       lastRefreshAt: null,

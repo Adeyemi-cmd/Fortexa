@@ -11,7 +11,8 @@ const LOCKED_ERROR = "Account login is temporarily locked due to failed attempts
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/auth/refresh");
-  const auth = requireAuth(request);
+  // A logged-out session must not be able to mint a new generation.
+  const auth = await requireActiveAuth(request);
 
   if (!auth.ok) {
     logWarn("Auth refresh unauthorized", context);
@@ -54,20 +55,17 @@ export async function POST(request: NextRequest) {
         userId: auth.session.userId,
       },
     },
+    // The response rotates a session cookie, so it must never be cached.
+    noStore: true,
   });
 
-  response.cookies.set(AUTH_COOKIE_KEY, token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-  });
+  setSessionCookie(response, rotated.token);
 
   logInfo("Auth refresh success", {
     ...context,
     userId: auth.session.userId,
     role: auth.session.role,
+    generation: rotated.generation,
   });
 
   return response;

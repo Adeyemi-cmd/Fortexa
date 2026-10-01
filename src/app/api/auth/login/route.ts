@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 429,
-      body: { error: "Too many login attempts. Try again later." },
+      body: { error: "Too many login attempts. Try again later.", code: "rate_limited" },
       headers: rateLimitHeaders(rate),
     });
   }
@@ -73,7 +73,11 @@ export async function POST(request: NextRequest) {
         route: "/api/auth/login",
         startedAtMs,
         status: 400,
-        body: { error: "Invalid login payload.", details: toPublicValidationDetails(parsed.error) },
+        body: {
+          error: "Invalid login payload.",
+          code: "invalid_payload",
+          details: toPublicValidationDetails(parsed.error),
+        },
         headers: rateLimitHeaders(rate),
       });
     }
@@ -135,7 +139,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const role = resolveRoleByWallet(normalizedWallet);
+    const roles = resolveRolesByWallet(normalizedWallet);
 
     if (!role) {
       const failure = await registerLoginFailure(userId, clientIp);
@@ -170,9 +174,10 @@ export async function POST(request: NextRequest) {
       provider: "login",
     });
 
-    const token = createSessionToken({
+    const session = startSession({
       email: `wallet:${normalizedWallet}`,
-      role,
+      role: roles.includes("operator") ? "operator" : roles[0],
+      roles,
       userId,
     });
 
@@ -182,19 +187,16 @@ export async function POST(request: NextRequest) {
       status: 200,
       body: {
         ok: true,
-        role,
+        role: roles.includes("operator") ? "operator" : roles[0],
+        roles,
         wallet: normalizedWallet,
       },
       headers: rateLimitHeaders(rate),
+      // The response sets a session cookie, so it must never be cached.
+      noStore: true,
     });
 
-    response.cookies.set(AUTH_COOKIE_KEY, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(response, session.token);
 
     await clearLoginFailures(userId, clientIp);
 
@@ -202,6 +204,16 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof WalletAlreadyBoundError) {
+      return jsonWithRequestContext(request, {
+        route: "/api/auth/login",
+        startedAtMs,
+        status: 409,
+        body: { error: error.message },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     logError("Auth login internal error", {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",
@@ -210,7 +222,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 500,
-      body: { error: error instanceof Error ? error.message : "Login failed." },
+      body: { error: error instanceof Error ? error.message : "Login failed.", code: "internal_error" },
       headers: rateLimitHeaders(rate),
     });
   }
