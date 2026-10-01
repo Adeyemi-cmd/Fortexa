@@ -45,6 +45,8 @@ export async function POST(request: NextRequest) {
         userId: auth.session.userId,
       },
     },
+    // The response rotates a session cookie, so it must never be cached.
+    noStore: true,
   });
 
   setSessionCookie(response, rotated.token);

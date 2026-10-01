@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { securityHeadersForRequest } from "@/lib/security/headers";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
@@ -16,7 +17,7 @@ export async function POST(request: NextRequest) {
   if (!rate.ok) {
     return NextResponse.json(
       { error: "Rate limit exceeded for legacy pay endpoint." },
-      { status: 429, headers: rateLimitHeaders(rate) }
+      { status: 429, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   }
 
@@ -46,7 +47,7 @@ export async function POST(request: NextRequest) {
           error: "Invalid pay request body.",
           details: toPublicValidationDetails(parsedPayload.error),
         },
-        { status: 400, headers: rateLimitHeaders(rate) }
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
 
@@ -56,12 +57,12 @@ export async function POST(request: NextRequest) {
           "Direct pay endpoint is disabled. Use wallet-agnostic signed-XDR flow: /api/stellar/build-payment + /api/stellar/submit-signed.",
         userId,
       },
-      { status: 400, headers: rateLimitHeaders(rate) }
+      { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Payment failed." },
-      { status: 500, headers: rateLimitHeaders(rate) }
+      { status: 500, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   }
 }

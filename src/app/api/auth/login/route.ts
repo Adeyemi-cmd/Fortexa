@@ -173,6 +173,8 @@ export async function POST(request: NextRequest) {
         wallet: normalizedWallet,
       },
       headers: rateLimitHeaders(rate),
+      // The response sets a session cookie, so it must never be cached.
+      noStore: true,
     });
 
     setSessionCookie(response, session.token);

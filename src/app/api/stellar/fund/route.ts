@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getRequestLogContext, logWarn } from "@/lib/observability/logger";
-import { STELLAR_PUBLIC_NETWORK_PASSPHRASE } from "@/lib/stellar/network";
-import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
+import { securityHeadersForRequest } from "@/lib/security/headers";
 
 export async function POST(request: NextRequest) {
   const auth = requireAuth(request);
@@ -22,6 +20,6 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json(
     { error: "Friendbot funding has been removed from this project." },
-    { status: 410 }
+    { status: 410, headers: securityHeadersForRequest(request) }
   );
 }

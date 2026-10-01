@@ -4,7 +4,8 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getWalletFromSession } from "@/lib/auth/session-wallet";
 import { getRequestLogContext, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { getUserWallet, upsertUserWallet, WalletAlreadyBoundError } from "@/lib/storage/user-wallet-store";
+import { securityHeadersForRequest } from "@/lib/security/headers";
+import { getUserWallet, upsertUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarSetupRequestSchema } from "@/lib/validation/schemas";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
   if (!rate.ok) {
     return NextResponse.json(
       { error: "Rate limit exceeded for wallet setup." },
-      { status: 429, headers: rateLimitHeaders(rate) }
+      { status: 429, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   }
 
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
           error: "Invalid wallet setup request.",
           details: toPublicValidationDetails(parsedBody.error),
         },
-        { status: 400, headers: rateLimitHeaders(rate) }
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
 
@@ -60,7 +61,7 @@ export async function POST(request: NextRequest) {
     if (assignedWallet && "expired" in assignedWallet) {
       return NextResponse.json(
         { error: "Session wallet mapping has expired." },
-        { status: 401, headers: rateLimitHeaders(rate) }
+        { status: 401, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
 
@@ -68,7 +69,7 @@ export async function POST(request: NextRequest) {
     if (!sessionWallet) {
       return NextResponse.json(
         { error: "Session is not bound to a valid Stellar wallet." },
-        { status: 400, headers: rateLimitHeaders(rate) }
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
 
@@ -89,7 +90,7 @@ export async function POST(request: NextRequest) {
         publicKey: sessionWallet,
         message: "Session wallet synced for transaction execution.",
       },
-      { headers: rateLimitHeaders(rate) }
+      { headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   } catch (error) {
     if (error instanceof WalletAlreadyBoundError) {
@@ -98,7 +99,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to setup Stellar testnet wallet." },
-      { status: 500, headers: rateLimitHeaders(rate) }
+      { status: 500, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
     );
   }
 }

@@ -3,8 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
-import { enforceRequestGate, gateErrorHeaders } from "@/lib/security/enforcement-gate";
-import { rateLimitHeaders } from "@/lib/security/rate-limit";
+import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { securityHeadersForRequest } from "@/lib/security/headers";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
@@ -31,11 +31,8 @@ export async function POST(request: NextRequest) {
 
   if (!gate.ok) {
     return NextResponse.json(
-      {
-        error: gate.error,
-        code: gate.code,
-      },
-      { status: gate.status, headers: gateErrorHeaders(gate) },
+      { error: "Rate limit exceeded for payment build endpoint." },
+      { status: 429, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   }
 
@@ -48,20 +45,33 @@ export async function POST(request: NextRequest) {
       return auth.response;
     }
 
+    const readinessReport = getProtectedPaymentFlowReadinessReport();
+    if (readinessReport) {
+      return NextResponse.json(
+        {
+          error:
+            "Protected payment flows are disabled until Fortexa passes the production readiness check.",
+          issues: readinessReport.issues,
+          command: "npm run check:production-readiness",
+        },
+        { status: 503, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
+      );
+    }
+
     const userId = auth.session.userId;
     const assignedWallet = await getUserWallet(userId);
 
     if (assignedWallet && "expired" in assignedWallet) {
       return NextResponse.json(
         { error: "Session wallet mapping has expired." },
-        { status: 401, headers: rateLimitHeaders(rate) }
+        { status: 401, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } }
       );
     }
 
     if (!bodyResult.ok) {
       return NextResponse.json(
         { error: bodyResult.error },
-        { status: 413, headers: rateLimitHeaders(rate) },
+        { status: 413, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -73,7 +83,7 @@ export async function POST(request: NextRequest) {
           error: "Invalid payment build request.",
           details: parsedPayload.error.flatten(),
         },
-        { status: 400, headers: rateLimitHeaders(rate) },
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -87,7 +97,7 @@ export async function POST(request: NextRequest) {
           error:
             "A linked Stellar wallet is required before building transactions.",
         },
-        { status: 400, headers: rateLimitHeaders(rate) },
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -106,7 +116,7 @@ export async function POST(request: NextRequest) {
           error: verification.error,
           field: verification.field,
         },
-        { status: verification.status, headers: rateLimitHeaders(rate) },
+        { status: verification.status, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -129,7 +139,7 @@ export async function POST(request: NextRequest) {
         xdr: unsigned.xdr,
         networkPassphrase: unsigned.networkPassphrase,
       },
-      { headers: rateLimitHeaders(rate) },
+      { headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   } catch (error) {
     return NextResponse.json(
@@ -139,7 +149,7 @@ export async function POST(request: NextRequest) {
             ? error.message
             : "Failed to build payment transaction.",
       },
-      { status: 500, headers: rateLimitHeaders(rate) },
+      { status: 500, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   }
 }
