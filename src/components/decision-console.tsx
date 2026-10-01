@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Loader2,
   Sparkles,
@@ -78,6 +78,9 @@ type BuildPaymentResponse = {
   xdr?: string;
   sourcePublicKey?: string;
   networkPassphrase?: string;
+  decisionId?: string;
+  quoteExpiresAt?: string;
+  buildAuthorization?: string;
 };
 
 type AgentPlanResponse = { ok?: boolean; error?: string; action?: AgentAction };
@@ -100,6 +103,8 @@ export function DecisionConsole() {
   const [executeAmount, setExecuteAmount] = useState("");
   const [decisionData, setDecisionData] = useState<DecisionApiResponse | null>(null);
   const [authorizedAuditEntryId, setAuthorizedAuditEntryId] = useState<string | null>(null);
+  const [paymentBuildAuthorization, setPaymentBuildAuthorization] = useState<string | null>(null);
+  const [paymentQuoteExpiresAt, setPaymentQuoteExpiresAt] = useState<string | null>(null);
   const [lastTxExplorerUrl, setLastTxExplorerUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -138,7 +143,16 @@ export function DecisionConsole() {
     Number.isFinite(parsedExecuteAmount) && parsedExecuteAmount > 0 ? parsedExecuteAmount : evaluatedAmount;
   const destinationPreview = destination.trim().toUpperCase();
 
+  useEffect(() => {
+    if (step === 4 && evaluatedAmount != null && !executeAmount) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the prefill of a user-editable amount field
+      setExecuteAmount(String(evaluatedAmount));
+    }
+  }, [step, evaluatedAmount, executeAmount]);
+
   function resetPreparedXdr() {
+    setPaymentBuildAuthorization(null);
+    setPaymentQuoteExpiresAt(null);
     setUnsignedXdr("");
     setSignedXdrInput("");
     setSourcePublicKey("");
@@ -233,15 +247,12 @@ export function DecisionConsole() {
         return;
       }
 
+      resetPreparedXdr();
       setDecisionData(payload);
       setAuthorizedAuditEntryId(payload.auditEntry.id);
       setMessage("Decision recorded in audit trail.");
       pushToast("success", "Evaluation complete.");
-      const nextStep = payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4;
-      if (nextStep === 4 && evaluatedAmount != null && !executeAmount) {
-        setExecuteAmount(String(evaluatedAmount));
-      }
-      setStep(nextStep);
+      setStep(payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4);
     } catch (error) {
       const err = error instanceof Error ? error.message : "Unexpected failure.";
       setMessage(err);
@@ -340,12 +351,16 @@ export function DecisionConsole() {
       });
 
       const buildPayload = (await buildResponse.json()) as BuildPaymentResponse;
-      if (!buildResponse.ok || buildPayload.error || !buildPayload.xdr) {
+      if (!buildResponse.ok || buildPayload.error || !buildPayload.xdr ||
+          buildPayload.decisionId !== authorizedAuditEntryId ||
+          !buildPayload.quoteExpiresAt || !buildPayload.buildAuthorization) {
         setMessage(buildPayload.error ?? "Failed to build XDR.");
         return;
       }
 
       setUnsignedXdr(buildPayload.xdr);
+      setPaymentBuildAuthorization(buildPayload.buildAuthorization);
+      setPaymentQuoteExpiresAt(buildPayload.quoteExpiresAt);
       setSignedXdrInput(buildPayload.xdr);
       setSourcePublicKey(buildPayload.sourcePublicKey ?? balancePayload.publicKey ?? "");
       setNetworkPassphrase(buildPayload.networkPassphrase ?? "TESTNET");
@@ -388,6 +403,10 @@ export function DecisionConsole() {
 
   async function submitSignedXdr(signedXdrArg?: string) {
     if (!ensureOperator()) return;
+    if (!authorizedAuditEntryId || !paymentQuoteExpiresAt || !paymentBuildAuthorization) {
+      setMessage("Build a payment from a current decision before submitting.");
+      return;
+    }
     const signedXdr = (signedXdrArg ?? signedXdrInput).trim();
     if (!signedXdr) return;
 
@@ -402,7 +421,12 @@ export function DecisionConsole() {
       const submitResponse = await fetch("/api/stellar/submit-signed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ signedXdr }),
+        body: JSON.stringify({
+          signedXdr,
+          decisionId: authorizedAuditEntryId,
+          quoteExpiresAt: paymentQuoteExpiresAt,
+          buildAuthorization: paymentBuildAuthorization,
+        }),
       });
 
       const submitPayload = (await submitResponse.json()) as {

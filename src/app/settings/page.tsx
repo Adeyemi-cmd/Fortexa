@@ -8,6 +8,13 @@ import { evaluateScenarioCatalog } from "@/lib/scenarios/evaluate";
 import { TabNav, type TabItem } from "@/components/ui/tab-nav";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
+import {
+  getStellarHorizonUrl,
+  getStellarNetworkFingerprint,
+  getStellarNetworkPassphrase,
+  inferStellarNetworkProfile,
+  resolveStellarNetworkConfig,
+} from "@/lib/stellar/network-config";
 import { listAuditEntries } from "@/lib/storage/audit-store";
 
 const tabs: TabItem[] = [
@@ -38,7 +45,21 @@ export default async function SettingsPage({
     <div className="mx-auto max-w-6xl space-y-6">
       <TabNav tabs={tabs} activeTab={activeTab} />
 
-      {activeTab === "policies" ? <PolicyEditor /> : null}
+      <section className="surface-elevated p-6" aria-label="Server network configuration">
+        <h2 className="text-lg font-semibold">Server network</h2>
+        <p className="mt-2 text-sm">Network: {inferStellarNetworkProfile(horizonUrl)}</p>
+        <p className="text-sm">Network passphrase: {networkPassphrase}</p>
+        <p className="text-sm">Configuration valid: {network.ok ? "yes" : "no"}</p>
+        {!network.ok ? (
+          <p role="alert" className="mt-2 text-sm text-red-400">
+            Network mismatch: server Horizon and passphrase disagree. Saving is disabled.
+          </p>
+        ) : null}
+      </section>
+
+      {activeTab === "policies" ? (
+        <PolicyEditor networkMatches={network.ok} networkFingerprint={getStellarNetworkFingerprint()} />
+      ) : null}
       {activeTab === "wallet" ? (
         <div className="space-y-6">
           <WalletStatusCard />

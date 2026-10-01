@@ -80,7 +80,7 @@ This tranche focuses on system telemetry, audit visibility, idempotent transacti
 ### Deliverable 2.4: Idempotency Submission Key Protection
 * **Scope**: Preventing double-submission errors in payment transactions via user-key mapping and cached transaction hash checks.
 * **Repository Artifact**: [src/app/api/stellar/submit-signed/route.ts](file:///c:/Users/ICT%20LASIEC/Fortexa/src/app/api/stellar/submit-signed/route.ts)
-* **Acceptance Criteria**: The endpoint caches submit results and returns 409 conflicts on mismatched payloads; tests in [src/app/api/stellar/submit-signed/route.test.ts](file:///c:/Users/ICT%20LASIEC/Fortexa/src/app/api/stellar/submit-signed/route.test.ts) pass.
+* **Acceptance Criteria**: The endpoint claims the idempotency key before submitting, returns the stored status and transaction id on replay, and returns 409 on a mismatched body without building a second payment; tests in [src/app/api/stellar/submit-signed-idempotency.test.ts](file:///c:/Users/ICT%20LASIEC/Fortexa/src/app/api/stellar/submit-signed-idempotency.test.ts) and [src/lib/storage/submit-idempotency-store.test.ts](file:///c:/Users/ICT%20LASIEC/Fortexa/src/lib/storage/submit-idempotency-store.test.ts) pass.
 * **Why it matters for Stellar agent payments**: Protects automated agents from executing duplicate payments if client apps or API gateways trigger redundant retries under flaky network conditions.
 * **Risk Level**: Medium
 

@@ -4,31 +4,64 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { listAllAuditEntriesByUser, listAuditEntries, validateAuditFilter } from "@/lib/storage/audit-store";
-import { sanitizeCsvCell } from "@/utils/csv.utils";
+import { toCsv } from "@/utils/csv.utils";
+import type { CsvRow } from "@/utils/csv.utils";
 import type { AuditFilter } from "@/lib/storage/audit-store";
 import { redactAuditExportEntriesByUser, redactAuditExportPayload } from "@/lib/audit/redact";
-import { getChainBoundaries } from "@/lib/audit/hash-chain";
+import { AuditChainError, verifyAuditChain } from "@/lib/audit/hash-chain";
+import type { ChainVerificationResult } from "@/lib/audit/hash-chain";
 
+const AUDIT_CHAIN_VERIFICATION_FAILED = "audit_chain_verification_failed";
 
+/**
+ * Turns a verifier failure into an error response. No CSV is ever written when
+ * this path is taken, so a broken chain can never be published in either
+ * format. The row-cap violation is a client error (413); a broken chain is an
+ * unprocessable export (422).
+ */
+function chainErrorResponse(
+  request: NextRequest,
+  startedAtMs: number,
+  error: AuditChainError,
+) {
+  const status = error.code === "audit_chain_row_cap_exceeded" ? 413 : 422;
+  return jsonWithRequestContext(request, {
+    route: "/api/audit/export",
+    startedAtMs,
+    status,
+    body: {
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    },
+  });
+}
 
+function chainFailureDetails(result: Extract<ChainVerificationResult, { valid: false }>) {
+  return {
+    entryId: result.entryId ?? null,
+    index: result.index ?? null,
+    checkedCount: result.checkedCount,
+    legacyCount: result.legacyCount,
+  };
+}
 
-
-
-function toCsv(rows: Array<Record<string, string | number | boolean | null>>) {
-  if (rows.length === 0) {
-    return "";
-  }
-
-  const headers = Object.keys(rows[0] ?? {});
-  const escape = (value: string) => `"${value.replaceAll("\"", "\"\"")}"`;
-  const lines = [headers.join(",")];
-
-  for (const row of rows) {
-    const line = headers.map((header) => escape(sanitizeCsvCell(row[header] ?? ""))).join(",");
-    lines.push(line);
-  }
-
-  return `${lines.join("\n")}\n`;
+function chainErrorResponse(
+  request: NextRequest,
+  startedAtMs: number,
+  error: AuditChainError,
+) {
+  const status = error.code === "audit_chain_row_cap_exceeded" ? 413 : 422;
+  return jsonWithRequestContext(request, {
+    route: "/api/audit/export",
+    startedAtMs,
+    status,
+    body: {
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    },
+  });
 }
 
 export async function GET(request: NextRequest) {
@@ -88,6 +121,22 @@ export async function GET(request: NextRequest) {
     if (exportAll) {
       const all = await listAllAuditEntriesByUser(filter);
 
+      // Verify every user's chain before any encoder runs. The verifier enforces
+      // the shared row cap and both formats abort together on a broken chain.
+      const verifiedByUser = Object.fromEntries(
+        Object.entries(all).map(([userId, entries]) => {
+          const verified = verifyAuditChain(entries);
+          if (!verified.result.valid) {
+            throw new AuditChainError(
+              AUDIT_CHAIN_VERIFICATION_FAILED,
+              `Audit chain for user "${userId}" failed verification: ${verified.result.reason}`,
+              { userId, ...chainFailureDetails(verified.result) },
+            );
+          }
+          return [userId, verified] as const;
+        }),
+      );
+
       if (format === "json") {
         logInfo("Audit export success (all/json)", { ...context, userId: auth.session.userId });
         return jsonWithRequestContext(request, {
@@ -99,17 +148,16 @@ export async function GET(request: NextRequest) {
             exportedBy: auth.session.userId,
             entriesByUser: redactAuditExportEntriesByUser(all),
             chainBoundariesByUser: Object.fromEntries(
-              Object.entries(all).map(([userId, entries]) => [
+              Object.entries(verifiedByUser).map(([userId, verified]) => [
                 userId,
-                getChainBoundaries(entries),
+                verified.boundaries,
               ]),
             ),
           },
-
         });
       }
 
-      const rows: Array<Record<string, string | number | boolean | null>> = [];
+      const rows: CsvRow[] = [];
       for (const [userId, entries] of Object.entries(all)) {
         for (const entry of entries) {
           rows.push({
@@ -129,17 +177,28 @@ export async function GET(request: NextRequest) {
       }
 
       logInfo("Audit export success (all/csv)", { ...context, userId: auth.session.userId });
-      return new NextResponse(toCsv(rows), {
+      return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=fortexa-audit-all.csv",
+          "Content-Disposition": `attachment; filename=${filenameAll}`,
           "x-request-id": request.headers.get("x-request-id") ?? crypto.randomUUID(),
         },
       });
     }
 
     const mine = await listAuditEntries(auth.session.userId, filter);
+
+    // Verify the chain before the CSV encoder runs so a rewritten log can never
+    // be published. The row cap is enforced by the same verifier as the JSON path.
+    const verified = verifyAuditChain(mine);
+    if (!verified.result.valid) {
+      throw new AuditChainError(
+        AUDIT_CHAIN_VERIFICATION_FAILED,
+        `Audit chain failed verification: ${verified.result.reason}`,
+        chainFailureDetails(verified.result),
+      );
+    }
 
     if (format === "json") {
       logInfo("Audit export success (mine/json)", { ...context, userId: auth.session.userId });
@@ -151,13 +210,12 @@ export async function GET(request: NextRequest) {
           scope: "mine",
           userId: auth.session.userId,
           entries: redactAuditExportPayload(mine),
-          chainBoundary: getChainBoundaries(mine),
+          chainBoundary: verified.boundaries,
         },
-
       });
     }
 
-    const rows = mine.map((entry) => ({
+    const rows: CsvRow[] = mine.map((entry) => ({
       userId: auth.session.userId,
       id: entry.id,
       timestamp: entry.timestamp,
@@ -173,7 +231,7 @@ export async function GET(request: NextRequest) {
 
     logInfo("Audit export success (mine/csv)", { ...context, userId: auth.session.userId });
     const filenameMine = `fortexa-audit-mine-${new Date().toISOString().slice(0, 10)}.csv`;
-    return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
+    return new NextResponse(toCsv(rows), {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
@@ -182,6 +240,16 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof AuditChainError) {
+      logWarn("Audit export blocked by chain verification", {
+        ...context,
+        userId: auth.session.userId,
+        code: error.code,
+        detail: error.message,
+      });
+      return chainErrorResponse(request, startedAtMs, error);
+    }
+
     logError("Audit export internal error", {
       ...context,
       userId: auth.session.userId,
