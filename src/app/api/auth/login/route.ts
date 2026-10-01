@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from "@/lib/auth/login-lockout";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { userIdForWallet } from "@/lib/auth/user-id";
 import { verifyWalletChallenge } from "@/lib/auth/wallet-challenge";
 import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet-role";
 import { jsonWithRequestContext } from "@/lib/observability/http";
@@ -139,7 +140,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const userId = `wallet:${normalizedWallet}`;
+    const userId = await userIdForWallet(normalizedWallet);
 
     await upsertUserWallet(userId, {
       publicKey: normalizedWallet,

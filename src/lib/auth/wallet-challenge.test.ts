@@ -34,10 +34,15 @@ describe("wallet challenge", () => {
     expect(challenge.message).toContain(`Wallet: ${TEST_PUBLIC_KEY}`);
     expect(challenge.message).toContain(`Challenge: ${challenge.id}`);
     expect(challenge.expiresAtMs).toBeGreaterThan(Date.now());
+    expect(challenge.message).toContain(`Origin: ${challenge.origin}`);
+    expect(challenge.message).toContain(`Nonce: ${challenge.nonce}`);
+    expect(challenge.message).toContain("Expires: ");
     expect(buildChallengeMessage({
       challengeId: challenge.id,
       publicKey: challenge.publicKey,
       expiresAtMs: challenge.expiresAtMs,
+      origin: challenge.origin,
+      nonce: challenge.nonce,
     })).toBe(challenge.message);
   });
 

@@ -1,4 +1,7 @@
-"use client";
+import { useSessionWallet } from '@/lib/auth/session-wallet';
+import { useWalletRole } from '@/lib/auth/wallet-role';
+import { useWallet } from '@solana/wallet-adapter-react';
+import { Button } from './ui/button';
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -10,17 +13,8 @@ import { useAuthSession } from "@/lib/auth/use-auth-session";
 import { truncateMiddle } from "@/lib/utils/format";
 import { cn } from "@/lib/utils/cn";
 
-type WalletData = {
-  configured: boolean;
-  userId?: string;
-  source?: "external";
-  provider?: string;
-  publicKey?: string;
-  balance?: string;
-  message?: string;
-  error?: string;
-  network?: string;
-};
+  const isMatchingWallet = connected && publicKey && sessionWallet && publicKey.equals(sessionWallet);
+  const showMismatch = connected && publicKey && sessionWallet && !isMatchingWallet;
 
 /** Read the account currently selected in Freighter without prompting for access. */
 async function readConnectedAccount(): Promise<string | null> {
@@ -224,16 +218,14 @@ export function WalletStatusCard({
   }
 
   return (
-    <div className="surface-elevated p-6">
-      <div className="mb-4 flex items-center justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-wider text-[hsl(var(--muted-foreground))]">Wallet layer</p>
-          <p className="text-lg font-semibold">Agent wallet</p>
-        </div>
-        <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
-          <RefreshCw aria-hidden="true" className={cn("mr-2 h-3.5 w-3.5", loading && "animate-spin")} />
-          Refresh
-        </Button>
+    <div className="p-4 border rounded-lg space-y-4">
+      <div>
+        Connected: {publicKey?.toBase58().slice(0, 6)}...
+        {showMismatch && (
+          <div className="text-sm text-amber-600">
+            Session wallet mismatch
+          </div>
+        )}
       </div>
 
       {data?.publicKey && walletState.status !== "signed_out" ? (

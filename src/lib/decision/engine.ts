@@ -1,5 +1,7 @@
 import { evaluatePolicy } from "@/lib/policy/engine";
+import { isUserWalletRevoked } from "@/lib/storage/user-wallet-store";
 import { evaluateSecurity } from "@/lib/security/analyzer";
+import { checkBlocklist } from "@/lib/security/blocklist";
 import type {
   AgentAction,
   DailyUsage,
@@ -23,24 +25,36 @@ function decideExplanation(result: DecisionResult): string {
   return "Fortexa approved this action. Policy checks and risk analysis are within trusted operating bounds.";
 }
 
+/** A revoked wallet binding cannot authorize another decision. */
+export async function canPassDecisionGate(userId: string): Promise<boolean> {
+  return !(await isUserWalletRevoked(userId));
+}
+
 export async function evaluateDecision(
   action: AgentAction,
   policy: PolicyConfig,
   usage: DailyUsage,
 ): Promise<DecisionResult> {
   const policyResult = evaluatePolicy(action, policy, usage);
-  const security = await evaluateSecurity(action);
+  // The analyzer and the blocklist are independent checks: an allow is only
+  // possible when both allow the destination. A deny from either blocks.
+  const [security, blocklist] = await Promise.all([
+    evaluateSecurity(action),
+    checkBlocklist(action.domain),
+  ]);
 
-  const severeSecurityFinding = security.findings.some(
+  const analyzerDeny = security.findings.find(
     (finding) => finding.severity === "high",
   );
+  const denyReasonCode = analyzerDeny?.code ?? blocklist.reasonCode ?? undefined;
+  const securityDeny = Boolean(analyzerDeny) || !blocklist.allow;
   const mediumSecurityFinding = security.findings.some(
     (finding) => finding.severity === "medium",
   );
 
   let decision: DecisionResult["decision"] = "APPROVE";
 
-  if (policyResult.hardBlock || severeSecurityFinding) {
+  if (policyResult.hardBlock || securityDeny) {
     decision = "BLOCK";
   } else if (
     policyResult.requireApproval ||
@@ -71,6 +85,7 @@ export async function evaluateDecision(
     riskFindings: security.findings,
     requiresManualApproval: decision === "REQUIRE_APPROVAL",
     analyzerStatus: security.analyzerStatus,
+    ...(denyReasonCode ? { reasonCode: denyReasonCode } : {}),
   };
 
   result.explanation = decideExplanation(result);
