@@ -87,7 +87,7 @@ function addIssue(
 type ReadinessEnv = Record<string, string | undefined>;
 
 export function checkProductionReadiness(
-  env: ReadinessEnv = process.env,
+  env: Partial<NodeJS.ProcessEnv> = process.env,
   options: ProductionReadinessOptions = {}
 ): ProductionReadinessReport {
   const cwd = options.cwd ?? process.cwd();
@@ -135,7 +135,10 @@ export function checkProductionReadiness(
 
   if (horizonUrl) {
     const inferredNetwork = inferStellarNetworkFromHorizonUrl(
-      getStellarHorizonUrl({ ...env, STELLAR_HORIZON_URL: horizonUrl })
+      getStellarHorizonUrl({
+        ...env,
+        STELLAR_HORIZON_URL: horizonUrl,
+      } as NodeJS.ProcessEnv)
     );
 
     if (inferredNetwork === "testnet") {
@@ -247,13 +250,13 @@ export function checkProductionReadiness(
 }
 
 export function shouldEnforceProductionReadiness(
-  env: ReadinessEnv = process.env
+  env: Partial<NodeJS.ProcessEnv> = process.env
 ) {
   return env.NODE_ENV === "production";
 }
 
 export function getProtectedPaymentFlowReadinessReport(
-  env: ReadinessEnv = process.env,
+  env: Partial<NodeJS.ProcessEnv> = process.env,
   options: ProductionReadinessOptions = {}
 ) {
   if (!shouldEnforceProductionReadiness(env)) {

@@ -8,8 +8,15 @@ import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observab
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { redactSensitiveFields } from "@/lib/observability/redact";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
-import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { submitSignedTransactionXdr } from "@/lib/stellar/client";
+import { enforceRequestGate, gateErrorHeaders } from "@/lib/security/enforcement-gate";
+import { rateLimitHeaders } from "@/lib/security/rate-limit";
+import {
+  decodeSignedXdrDestination,
+  decodeSignedXdrSourceAccount,
+  submitSignedTransactionXdr,
+  type SignedXdrDestinationResult,
+} from "@/lib/stellar/client";
+import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
 import {
   abortIdempotentSubmit,
   beginIdempotentSubmit,
@@ -27,6 +34,25 @@ type HorizonErrorContext = {
   explanation: string;
   nextStep: string;
 };
+
+/**
+ * Best-effort destination extraction from a signed XDR for gate checking.
+ * Runs before validation; a malformed envelope simply reports no destination
+ * (the strict decode later still returns the route's normal 400).
+ */
+function extractSignedXdrDestination(
+  signedXdr: string | undefined,
+): SignedXdrDestinationResult {
+  if (!signedXdr) {
+    return { ok: false, reason: "malformed" };
+  }
+
+  try {
+    return decodeSignedXdrDestination(signedXdr);
+  } catch {
+    return { ok: false, reason: "malformed" };
+  }
+}
 
 const HORIZON_TX_ERRORS: Record<string, HorizonErrorContext> = {
   tx_bad_seq: {
@@ -117,26 +143,47 @@ export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/stellar/submit-signed");
 
-  // Set once this request owns the idempotency key, so a failed submit only ever
-  // releases its own claim.
-  let claimedIdempotency: { userId: string; key: string; requestHash: string } | null = null;
+  // Read the body before the gate so the signed transaction's destination
+  // operations can be blocklist-checked in the same atomic enforcement step
+  // as the rate-limit consumption (issue #202).
+  const bodyResult = await readJsonBody(request);
 
-  const rate = await consumeRateLimit(request, {
-    key: "stellar-submit-signed",
+  let gateDestination: string | undefined;
+  if (bodyResult.ok) {
+    const destinationPreview = extractSignedXdrDestination(
+      typeof (bodyResult.data as { signedXdr?: unknown })?.signedXdr === "string"
+        ? ((bodyResult.data as { signedXdr: string }).signedXdr)
+        : undefined,
+    );
+    gateDestination = destinationPreview.ok ? destinationPreview.destination : undefined;
+  }
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "stellar-submit-signed",
     limit: 30,
     windowMs: 60_000,
+    destination: gateDestination,
   });
 
-  if (!rate.ok) {
-    logWarn("Submit signed route rate limited", context);
+  if (!gate.ok) {
+    logWarn("Submit signed route blocked by enforcement gate", {
+      ...context,
+      gateCode: gate.code,
+    });
+    recordStellarSubmitResult("validation_failure");
     return jsonWithRequestContext(request, {
       route: "/api/stellar/submit-signed",
       startedAtMs,
-      status: 429,
-      body: { error: "Rate limit exceeded for signed transaction submission." },
-      headers: rateLimitHeaders(rate),
+      status: gate.status,
+      body: {
+        error: gate.error,
+        code: gate.code,
+      },
+      headers: gateErrorHeaders(gate),
     });
   }
+
+  const rate = gate.rate;
 
   maybeRunCleanup();
 
@@ -162,7 +209,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const bodyResult = await readJsonBody(request);
+    const userId = auth.session.userId;
+
     if (!bodyResult.ok) {
       logWarn("Submit signed payload too large", { ...context, userId });
       return jsonWithRequestContext(request, {

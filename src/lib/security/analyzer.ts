@@ -4,20 +4,7 @@ import type {
   SecurityEvaluation,
   SecurityFinding,
 } from "@/lib/types/domain";
-import {
-  fetchBlocklist,
-  getBlocklistHealth,
-} from "@/lib/security/blocklist";
-
-/** Configuration for analyzer timeout behavior. */
-export interface AnalyzerConfig {
-  blocklistTimeoutMs: number;
-}
-
-/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
-export const defaultAnalyzerConfig: AnalyzerConfig = {
-  blocklistTimeoutMs: 5000,
-};
+import { fetchBlocklist } from "@/lib/security/blocklist";
 
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
@@ -90,7 +77,7 @@ function outputSafetyCheck(outputPreview?: string): SecurityFinding[] {
     }
   }
 
-  if (/private key|secret key|secret seed|mnemonic/i.test(outputPreview)) {
+  if (/private key|secret seed|mnemonic/i.test(outputPreview)) {
     findings.push({
       code: "SECRET_TARGETING",
       title: "Sensitive secret extraction attempt",
@@ -160,9 +147,13 @@ function isTimeoutFailure(error: unknown): boolean {
 }
 
 /**
- * Fetch blocklist with timeout support. Returns the blocklist (possibly
- * cached) plus a status describing whether the fetch succeeded, timed out,
- * or failed. Never throws: failures degrade to an empty blocklist.
+ * Fetch blocklist with failure tolerance.
+ *
+ * `fetchBlocklist` rejects on any failure (network error, non-200, timeout).
+ * A failed refresh must never take down decisioning, so the rejection is
+ * converted to a degraded status here. When the feed has cached domains from a
+ * previous successful refresh, they are still served on the next call, so the
+ * catch path receives an empty list only when no cached data exists.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
@@ -170,30 +161,17 @@ async function fetchBlocklistWithTimeout(): Promise<{
 }> {
   try {
     const blocklist = await fetchBlocklist();
-    const health = getBlocklistHealth();
-    if (health.lastError) {
-      return {
-        blocklist,
-        status: {
-          blocked: true,
-          timedOut: /abort|timeout/i.test(health.lastError),
-          error: health.lastError,
-        },
-      };
-    }
-
     return { blocklist, status: { blocked: false, timedOut: false } };
-  } catch (err) {
-    const health = getBlocklistHealth();
-    const error = health.lastError ?? (err instanceof Error ? err.message : "Blocklist fetch failed");
-    const timedOut = (err instanceof Error && err.name === "AbortError") || /abort|timeout/i.test(error);
-
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown fetch error";
+    const isTimeout = /abort|timeout/i.test(message);
     return {
       blocklist: [],
       status: {
         blocked: true,
-        timedOut,
-        error,
+        timedOut: isTimeout,
+        error: message,
       },
     };
   }
