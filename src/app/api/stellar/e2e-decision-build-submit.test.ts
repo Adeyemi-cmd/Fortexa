@@ -72,6 +72,7 @@ function operatorCookie() {
   const token = createSessionToken({
     email: "e2e-operator@fortexa.local",
     role: "operator",
+    roles: ["operator", "signer"],
     userId: OPERATOR_USER_ID,
     expiresInSeconds: 300,
   });

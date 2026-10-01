@@ -7,12 +7,12 @@ import { listAllAuditEntriesByUser, listAuditEntries, validateAuditFilter } from
 import { sanitizeCsvCell } from "@/utils/csv.utils";
 import type { AuditFilter } from "@/lib/storage/audit-store";
 import { redactAuditExportEntriesByUser, redactAuditExportPayload } from "@/lib/audit/redact";
-import { getChainBoundaries } from "@/lib/audit/hash-chain";
-
-
-
-
-
+import {
+  AuditChainError,
+  DEFAULT_MAX_CHAIN_ROWS,
+  getChainBoundaries,
+  verifyAuditChain,
+} from "@/lib/audit/hash-chain";
 
 function toCsv(rows: Array<Record<string, string | number | boolean | null>>) {
   if (rows.length === 0) {
@@ -29,6 +29,24 @@ function toCsv(rows: Array<Record<string, string | number | boolean | null>>) {
   }
 
   return `${lines.join("\n")}\n`;
+}
+
+function chainErrorResponse(
+  request: NextRequest,
+  startedAtMs: number,
+  error: AuditChainError,
+) {
+  const status = error.code === "audit_chain_row_cap_exceeded" ? 413 : 422;
+  return jsonWithRequestContext(request, {
+    route: "/api/audit/export",
+    startedAtMs,
+    status,
+    body: {
+      error: error.message,
+      code: error.code,
+      ...(error.details ?? {}),
+    },
+  });
 }
 
 export async function GET(request: NextRequest) {
@@ -88,6 +106,26 @@ export async function GET(request: NextRequest) {
     if (exportAll) {
       const all = await listAllAuditEntriesByUser(filter);
 
+      // Verify every user's chain before writing any response body.
+      const verifiedByUser: Record<string, ReturnType<typeof verifyAuditChain>> = {};
+      for (const [userId, entries] of Object.entries(all)) {
+        verifiedByUser[userId] = verifyAuditChain(entries);
+        const result = verifiedByUser[userId]!.result;
+        if (!result.valid) {
+          throw new AuditChainError(
+            "audit_chain_verification_failed",
+            `Audit chain for user "${userId}" failed verification: ${result.reason}`,
+            {
+              userId,
+              entryId: result.entryId ?? null,
+              index: result.index ?? null,
+              checkedCount: result.checkedCount,
+              legacyCount: result.legacyCount,
+            },
+          );
+        }
+      }
+
       if (format === "json") {
         logInfo("Audit export success (all/json)", { ...context, userId: auth.session.userId });
         return jsonWithRequestContext(request, {
@@ -99,13 +137,12 @@ export async function GET(request: NextRequest) {
             exportedBy: auth.session.userId,
             entriesByUser: redactAuditExportEntriesByUser(all),
             chainBoundariesByUser: Object.fromEntries(
-              Object.entries(all).map(([userId, entries]) => [
+              Object.entries(verifiedByUser).map(([userId, verified]) => [
                 userId,
-                getChainBoundaries(entries),
+                verified.boundaries,
               ]),
             ),
           },
-
         });
       }
 
@@ -129,17 +166,34 @@ export async function GET(request: NextRequest) {
       }
 
       logInfo("Audit export success (all/csv)", { ...context, userId: auth.session.userId });
-      return new NextResponse(toCsv(rows), {
+      return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=fortexa-audit-all.csv",
+          "Content-Disposition": `attachment; filename=${filenameAll}`,
           "x-request-id": request.headers.get("x-request-id") ?? crypto.randomUUID(),
         },
       });
     }
 
     const mine = await listAuditEntries(auth.session.userId, filter);
+
+    // Verify the chain from genesis through the last exported row before
+    // writing the body. The row cap is enforced here as well.
+    const verified = verifyAuditChain(mine);
+    if (!verified.result.valid) {
+      const result = verified.result;
+      throw new AuditChainError(
+        "audit_chain_verification_failed",
+        `Audit chain failed verification: ${result.reason}`,
+        {
+          entryId: result.entryId ?? null,
+          index: result.index ?? null,
+          checkedCount: result.checkedCount,
+          legacyCount: result.legacyCount,
+        },
+      );
+    }
 
     if (format === "json") {
       logInfo("Audit export success (mine/json)", { ...context, userId: auth.session.userId });
@@ -151,9 +205,8 @@ export async function GET(request: NextRequest) {
           scope: "mine",
           userId: auth.session.userId,
           entries: redactAuditExportPayload(mine),
-          chainBoundary: getChainBoundaries(mine),
+          chainBoundary: verified.boundaries,
         },
-
       });
     }
 
@@ -173,7 +226,7 @@ export async function GET(request: NextRequest) {
 
     logInfo("Audit export success (mine/csv)", { ...context, userId: auth.session.userId });
     const filenameMine = `fortexa-audit-mine-${new Date().toISOString().slice(0, 10)}.csv`;
-    return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
+    return new NextResponse(toCsv(rows), {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
@@ -182,6 +235,16 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof AuditChainError) {
+      logWarn("Audit export blocked by chain verification", {
+        ...context,
+        userId: auth.session.userId,
+        code: error.code,
+        detail: error.message,
+      });
+      return chainErrorResponse(request, startedAtMs, error);
+    }
+
     logError("Audit export internal error", {
       ...context,
       userId: auth.session.userId,

@@ -1,3 +1,12 @@
+import {
+  FeeBumpTransaction,
+  Memo,
+  MemoText,
+  TransactionBuilder,
+  type Transaction,
+} from "@stellar/stellar-sdk";
+
+import { getStellarNetworkPassphrase } from "@/lib/stellar/network-config";
 import { validateRequestTimestamp } from "@/lib/stellar/request-timestamp-skew";
 import {
   parseXlmNumberToStroops,
@@ -17,8 +26,7 @@ export type PaymentQuoteField =
   | "amountXLM"
   | "asset"
   | "memo"
-  | "network"
-  | "requestTimestampMs";
+  | "network";
 
 export type PaymentBuildParams = {
   destination: string;
@@ -26,15 +34,6 @@ export type PaymentBuildParams = {
   asset: StellarAssetId;
   memo?: string;
   network: StellarNetworkId;
-  /**
-   * Optional epoch-millisecond timestamp the client attaches to this
-   * request. When present, it's checked against the configured clock-skew
-   * window (see {@link validateRequestTimestamp}) before any other
-   * verification runs -- a stale or implausibly-future timestamp is
-   * rejected outright. Omitting it entirely skips the check, so existing
-   * callers that don't send a timestamp are unaffected.
-   */
-  requestTimestampMs?: number;
 };
 
 export type VerifyPaymentQuoteResult =
@@ -99,7 +98,7 @@ export function isValidPaymentAmountString(amount: string): boolean {
 const DEFAULT_QUOTE_TTL_SECONDS = 300;
 
 /**
- * Returns the payment quote TTL in milliseconds.
+ * Returns the payment quote TTL in seconds.
  * Reads FORTEXA_PAYMENT_QUOTE_TTL_SECONDS; falls back to 300 s when the
  * value is absent, non-numeric, or less than 1.
  */
@@ -108,29 +107,58 @@ export function getQuoteTtlMs(): number {
     process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS ?? DEFAULT_QUOTE_TTL_SECONDS,
   );
   if (!Number.isFinite(parsed) || parsed < 1) {
-    return DEFAULT_QUOTE_TTL_SECONDS * 1000;
+    return DEFAULT_QUOTE_TTL_SECONDS;
   }
-  return Math.floor(parsed) * 1000;
+  return Math.floor(parsed);
+}
+
+/**
+ * Shared "is this decision still allowed to spend?" gate: the quote must be
+ * present on the entry and still within its TTL window. Freshness is measured
+ * with the shared clock-skew primitive (issue #185) rather than a bespoke
+ * `Date.now()` subtraction, so the quote expires on the same boundary the rest
+ * of the payment flow uses. A quote timestamp that is unparseable, or dated
+ * implausibly far in the future, is refused for the same reason.
+ */
+function assertQuoteFreshAndPresent(auditEntry: AuditEntry): VerifyPaymentQuoteResult {
+  const freshness = validateRequestTimestamp(Date.parse(auditEntry.timestamp), {
+    maxPastSkewSeconds: getQuoteTtlSeconds(),
+  });
+
+  if (!freshness.ok) {
+    if (freshness.code === "stale") {
+      return {
+        ok: false,
+        status: 403,
+        error: "Payment quote has expired. Please re-evaluate the action.",
+      };
+    }
+    return {
+      ok: false,
+      status: 403,
+      error: "Payment quote has an invalid timestamp. Please re-evaluate the action.",
+      field: "requestTimestampMs",
+    };
+  }
+
+  const quote = auditEntry.paymentQuote;
+  if (!quote) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Decision is missing an authorized payment quote.",
+    };
+  }
+
+  return { ok: true, quote };
 }
 
 export function normalizeAmountXLM(amount: number | string): string {
-  const valid =
-    typeof amount === "number"
-      ? isValidPaymentAmountNumber(amount)
-      : isValidPaymentAmountString(amount);
-
-  if (!valid) {
-    throw new Error(PAYMENT_AMOUNT_ERROR);
+  const parsed = typeof amount === "number" ? amount : Number.parseFloat(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("Invalid XLM amount.");
   }
-
-  const stroops = toAuthorizedStroops(amount);
-  if (stroops === null) {
-    throw new Error(PAYMENT_AMOUNT_ERROR);
-  }
-
-  // Render from the exact stroop count rather than from a double, so the
-  // normalized string is the amount that was authorized, to the stroop.
-  return stroopsToXlmString(stroops);
+  return parsed.toFixed(7);
 }
 
 export function buildPaymentQuoteFromDecision(input: {
@@ -219,34 +247,15 @@ export function verifyPaymentAgainstQuote(
     };
   }
 
-  const quote = auditEntry.paymentQuote;
-  if (!quote) {
-    return {
-      ok: false,
-      status: 403,
-      error: "Decision is missing an authorized payment quote.",
-    };
-  }
+  const { quote } = gate;
 
-  let normalizedRequest: Omit<PaymentBuildParams, "amountXLM"> & {
-    amountXLM: string;
+  const normalizedRequest = {
+    destination: request.destination.trim().toUpperCase(),
+    amountXLM: normalizeAmountXLM(request.amountXLM),
+    asset: request.asset,
+    memo: (request.memo ?? quote.memo).slice(0, 28),
+    network: request.network,
   };
-  try {
-    normalizedRequest = {
-      destination: request.destination.trim().toUpperCase(),
-      amountXLM: normalizeAmountXLM(request.amountXLM),
-      asset: request.asset,
-      memo: (request.memo ?? quote.memo).slice(0, 28),
-      network: request.network,
-    };
-  } catch {
-    return {
-      ok: false,
-      status: 400,
-      error: PAYMENT_AMOUNT_ERROR,
-      field: "amountXLM",
-    };
-  }
 
   if (normalizedRequest.destination !== quote.destination) {
     return {
@@ -294,4 +303,190 @@ export function verifyPaymentAgainstQuote(
   }
 
   return { ok: true, quote };
+}
+
+/** Fields a signed-transaction verification can point at on failure. */
+export type SignedPaymentField =
+  | "amountStroops"
+  | "asset"
+  | "destination"
+  | "memo"
+  | "operations"
+  | "signedXdr";
+
+export type VerifySignedPaymentQuoteResult =
+  | { ok: true; quote: PaymentQuote; amountStroops: bigint }
+  | {
+      ok: false;
+      status: 400 | 403;
+      error: string;
+      field?: SignedPaymentField;
+    };
+
+/**
+ * Reads the text of a transaction memo, or `null` when the memo is not a text
+ * memo. A decoded memo carries its text as a UTF-8 `Buffer`, while one built
+ * in-process still carries the original string, so both shapes are normalized.
+ */
+function readTextMemoValue(memo: Memo): string | null {
+  if (memo.type !== MemoText) {
+    return null;
+  }
+
+  const value = memo.value;
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return null;
+}
+
+/**
+ * Verifies a *signed* payment transaction against the immutable quote stored on
+ * the audit entry, decoding the XDR in-process without ever contacting Horizon.
+ *
+ * The comparison runs in integer stroops on the decoded operation and requires
+ * the envelope to contain exactly one operation, and that operation to be a
+ * payment, so a caller cannot smuggle a second spend into a transaction that was
+ * authorized for a single payment. Asset, destination, memo type, memo value,
+ * and amount must all equal the stored quote; a one-stroop difference is a
+ * mismatch. The quote's freshness is checked with the shared clock-skew helper
+ * before the envelope is even decoded.
+ *
+ * @param auditEntry - The decision receipt whose `paymentQuote` was approved.
+ * @param signedXdr - Base64 envelope XDR of the signed payment to verify.
+ * @param options.networkPassphrase - Override for the configured network
+ *   passphrase, primarily for deterministic tests.
+ */
+export function verifySignedPaymentAgainstQuote(
+  auditEntry: AuditEntry | undefined,
+  signedXdr: string,
+  options: { networkPassphrase?: string } = {},
+): VerifySignedPaymentQuoteResult {
+  if (typeof signedXdr !== "string" || signedXdr.trim().length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      error: "A signed transaction XDR is required.",
+      field: "signedXdr",
+    };
+  }
+
+  if (!auditEntry) {
+    return {
+      ok: false,
+      status: 403,
+      error: "No authorized payment decision found for this request.",
+    };
+  }
+
+  if (!EXECUTABLE_DECISIONS.has(auditEntry.decision)) {
+    return {
+      ok: false,
+      status: 403,
+      error: `Decision '${auditEntry.decision}' does not authorize payment execution.`,
+    };
+  }
+
+  const gate = assertQuoteFreshAndPresent(auditEntry);
+  if (!gate.ok) {
+    return gate;
+  }
+  const { quote } = gate;
+
+  const networkPassphrase =
+    options.networkPassphrase ?? getStellarNetworkPassphrase();
+
+  let decoded: Transaction | FeeBumpTransaction;
+  try {
+    decoded = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        "Signed transaction XDR could not be decoded. It may be malformed or built for the wrong network.",
+      field: "signedXdr",
+    };
+  }
+
+  // A fee-bump envelope pays the fee from a second account but still carries the
+  // payment in its inner transaction, so verify the inner transaction either way.
+  const transaction =
+    decoded instanceof FeeBumpTransaction ? decoded.innerTransaction : decoded;
+
+  const operations = transaction.operations;
+  if (operations.length !== 1) {
+    return {
+      ok: false,
+      status: 403,
+      error:
+        "Signed transaction must contain exactly one operation: the authorized payment.",
+      field: "operations",
+    };
+  }
+
+  const operation = operations[0];
+  if (operation.type !== "payment") {
+    return {
+      ok: false,
+      status: 403,
+      error: "Signed transaction's only operation is not a payment.",
+      field: "operations",
+    };
+  }
+
+  if (operation.destination.trim().toUpperCase() !== quote.destination) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Destination does not match the authorized payment quote.",
+      field: "destination",
+    };
+  }
+
+  if (quote.asset !== "native" || !operation.asset.isNative()) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Asset does not match the authorized payment quote.",
+      field: "asset",
+    };
+  }
+
+  const transactionStroops = parseXlmToStroops(operation.amount);
+  const quoteStroops = parseXlmToStroops(quote.amountXLM);
+  if (!transactionStroops.ok || !quoteStroops.ok) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Payment amount could not be read as an exact stroop count.",
+      field: "amountStroops",
+    };
+  }
+
+  if (transactionStroops.stroops !== quoteStroops.stroops) {
+    return {
+      ok: false,
+      status: 403,
+      error:
+        `Payment amount ${stroopsToXlmString(transactionStroops.stroops)} XLM does not match the ` +
+        `authorized amount ${quote.amountXLM} XLM.`,
+      field: "amountStroops",
+    };
+  }
+
+  const memoText = readTextMemoValue(transaction.memo);
+  if (memoText === null || memoText !== quote.memo) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Memo does not match the authorized payment quote.",
+      field: "memo",
+    };
+  }
+
+  return { ok: true, quote, amountStroops: transactionStroops.stroops };
 }
