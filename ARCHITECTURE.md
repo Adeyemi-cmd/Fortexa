@@ -105,7 +105,9 @@ flowchart TB
 - `src/app/api/stellar/build-payment/route.ts`: builds unsigned TESTNET payment XDR.
 - `src/app/api/stellar/submit-signed/route.ts`: submits signed XDR, returns tx hash + explorer link.
 - `src/lib/stellar/client.ts`: Horizon calls, XDR construction, XDR submission.
-- `src/lib/storage/*-store.ts`: policy/audit/user-wallet persistence with DB fallback.
+- `src/lib/storage/*-store.ts`: policy/audit/user-wallet/submit-idempotency persistence with DB fallback.
+- `src/lib/storage/submit-idempotency-store.ts`: claims an idempotency key before submit, stores the accepted status + transaction id for replay, and rejects a reused key with a different canonical payment body.
+- `src/lib/storage/atomic-write.ts`: atomic JSON store writes (unique staging file + rename).
 - `src/lib/storage/db.ts`: optional Postgres connector + migration bootstrap + graceful fallback.
 - `src/app/api/metrics/route.ts` + `src/lib/observability/metrics.ts`: JSON and Prometheus metrics.
 

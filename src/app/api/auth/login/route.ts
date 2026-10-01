@@ -2,13 +2,14 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 
 import { clearLoginFailures, isLoginLocked, readClientIp, registerLoginFailure } from "@/lib/auth/login-lockout";
-import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { startSession } from "@/lib/auth/session";
+import { setSessionCookie } from "@/lib/auth/session-cookie";
 import { verifyWalletChallenge } from "@/lib/auth/wallet-challenge";
-import { normalizeWalletPublicKey, resolveRoleByWallet } from "@/lib/auth/wallet-role";
+import { normalizeWalletPublicKey, resolveRolesByWallet } from "@/lib/auth/wallet-role";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
-import { upsertUserWallet } from "@/lib/storage/user-wallet-store";
+import { upsertUserWallet, WalletAlreadyBoundError } from "@/lib/storage/user-wallet-store";
 import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 const loginSchema = z.object({
@@ -127,9 +128,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const role = resolveRoleByWallet(normalizedWallet);
+    const roles = resolveRolesByWallet(normalizedWallet);
 
-    if (!role) {
+    if (roles.length === 0) {
       const failure = await registerLoginFailure(normalizedWallet, clientIp);
       logWarn("Auth login unknown wallet", { ...context, wallet: normalizedWallet });
       return jsonWithRequestContext(request, {
@@ -146,7 +147,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const userId = `wallet:${normalizedWallet}`;
+    const userId = await userIdForWallet(normalizedWallet);
 
     await upsertUserWallet(userId, {
       publicKey: normalizedWallet,
@@ -154,9 +155,10 @@ export async function POST(request: NextRequest) {
       provider: "login",
     });
 
-    const token = createSessionToken({
+    const session = startSession({
       email: `wallet:${normalizedWallet}`,
-      role,
+      role: roles.includes("operator") ? "operator" : roles[0],
+      roles,
       userId,
     });
 
@@ -166,19 +168,14 @@ export async function POST(request: NextRequest) {
       status: 200,
       body: {
         ok: true,
-        role,
+        role: roles.includes("operator") ? "operator" : roles[0],
+        roles,
         wallet: normalizedWallet,
       },
       headers: rateLimitHeaders(rate),
     });
 
-    response.cookies.set(AUTH_COOKIE_KEY, token, {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    setSessionCookie(response, session.token);
 
     await clearLoginFailures(normalizedWallet, clientIp);
 
@@ -186,6 +183,16 @@ export async function POST(request: NextRequest) {
 
     return response;
   } catch (error) {
+    if (error instanceof WalletAlreadyBoundError) {
+      return jsonWithRequestContext(request, {
+        route: "/api/auth/login",
+        startedAtMs,
+        status: 409,
+        body: { error: error.message },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     logError("Auth login internal error", {
       ...context,
       detail: error instanceof Error ? error.message : "unknown",
