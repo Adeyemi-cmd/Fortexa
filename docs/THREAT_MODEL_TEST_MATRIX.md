@@ -20,7 +20,7 @@ Maps concrete abuse cases against test coverage. Gaps are surfaced as follow-up 
 |---|------------|-------------------|------------|---------------|----------------|-----------------|
 | 1 | **Excessive payment amount** | Agent submits a payment exceeding per-transaction or daily caps | Policy engine `perTxCapXLM` / `dailyCapXLM` enforce `REQUIRE_APPROVAL` or `BLOCK`; build-payment rejects tampered amounts | ✅ **Covered** | `src/lib/policy/engine.test.ts:104-124` (cap triggers), `src/lib/decision/engine.test.ts:38-42` (over-budget scenario), `src/app/api/stellar/build-payment/route.test.ts:190-207` (tampered amount) | — |
 | 2 | **Untrusted domain or tool target** | Agent targets a wallet-drainer domain, blocked tool, or typosquat TLD | Policy allowlist/blocklist, security analyzer heuristics, blocklist feed | ✅ **Covered** | `src/lib/policy/engine.test.ts:59-98` (blocked/unlisted domain & tool), `src/lib/security/analyzer.test.ts:58-101` (domain reputation, TLD, redirect traps), `src/lib/decision/engine.test.ts:32-36,51-57` (malicious endpoint & typosquat scenarios), `src/lib/security/analyzer.test.ts:117-185` (blocklist feed) | — |
-| 3 | **Repeated submission attempt (XDR replay / spam)** | Attacker replays the same signed XDR (or many different XDRs) to spam Horizon or double-spend | Idempotency key claimed before submit; canonical body hash rejects a reused key with a different payment; stored status/transaction id replayed; rate-limit middleware | 🟡 **Partial** | `src/app/api/stellar/submit-signed-idempotency.test.ts` (single outcome per key under concurrency, different destination rejected, failed submit releases the key), `src/lib/storage/submit-idempotency-store.test.ts` (claim/replay/conflict/lease/abort), `src/lib/storage/submit-idempotency-cleanup.test.ts` (in-flight record survives cleanup), `src/lib/security/rate-limit.test.ts` (generic bucket limiter) | No test validates that the submit-signed endpoint itself is rate-limited per user/IP. Follow-up: add rate-limit test for `POST /api/stellar/submit-signed`. |
+| 3 | **Repeated submission attempt (XDR replay / spam)** | Attacker replays the same signed XDR (or many different XDRs) to spam Horizon or double-spend | Idempotency key deduplication; rate-limit middleware | 🟡 **Partial** | `src/app/api/stellar/submit-signed-idempotency.test.ts` (key replay rejected), `src/lib/security/rate-limit.test.ts` (generic bucket limiter) | No test validates that the submit-signed endpoint itself is rate-limited per user/IP. Follow-up: add rate-limit test for `POST /api/stellar/submit-signed`. |
 | 4 | **Viewer attempting operator-only action** | A viewer-role user calls policy update, rollback, build-payment, or decision endpoints | `require-auth` middleware gates by `allowedRoles` | 🟡 **Partial** | `src/app/api/audit/export/route.test.ts:142-159` (viewer rejected for `scope=all`) | Remaining operator-only routes (policy CRUD, rollback, build-payment, decision, simulate) lack a dedicated viewer-rejection test. Follow-up: add `expect(status).toBe(403)` for viewer sessions on each operator-gated route. |
 | 5 | **Policy rollback misuse** | Operator rolls back to a non-existent version, or a viewer attempts rollback | `POST /api/policy/rollback` requires operator role; route validates `targetVersion` | 🟡 **Partial** | `src/app/api/policy/rollback/route.test.ts` (auth required, operator can rollback to v1) | No test for viewer rejection (403), no test for rollback to out-of-range version. Follow-up: add bounds-check test + viewer rejection test. |
 | 6 | **Unsigned / mismatched wallet payment submission** | Attacker submits an XDR signed by a keypair that does not match the user's registered wallet | No signature verification on submit-signed | ❌ **Uncovered** | — | The `POST /api/stellar/submit-signed` route does not verify that the XDR was signed by the Stellar key registered to the session user. An attacker with a valid session (or a compromised session cookie) could submit payments from any wallet. Follow-up: add server-side verification that `source` in the signed XDR matches the user's registered wallet public key. |
@@ -54,11 +54,32 @@ constants so any reviewer can reproduce the results.
 
 ---
 
+## Signed Payment Quote Verification — Evidence Fixtures
+
+Added by issue #206. These rows document the deterministic evidence cases for
+`verifySignedPaymentAgainstQuote`, which decodes a signed envelope locally (no
+Horizon call) and compares its single payment operation against the stored
+quote in integer stroops.
+
+| # | Evidence Case | What Is Asserted | Control Exercised | Expected Outcome | Test |
+|---|--------------|-----------------|-------------------|-----------------|------|
+| 16 | **Matching signed payment** | Asset, destination, memo text, and stroop amount all equal the quote | `verifySignedPaymentAgainstQuote` returns `{ ok: true }` | ✅ Accepted | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 17 | **One-stroop amount difference** | `10.0000000` authorized vs `10.0000001` signed | Integer-stroop amount comparison | ✅ Rejected (`field: "amountStroops"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 18 | **Extra bundled operation** | Quote authorized one payment; envelope carries two | `operations.length === 1` guard | ✅ Rejected (`field: "operations"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 19 | **Non-payment operation** | Only operation is `manageData`, not `payment` | Operation-type guard | ✅ Rejected (`field: "operations"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 20 | **Expired quote** | Signed after the quote TTL elapsed | `assertQuoteFreshAndPresent` via `validateRequestTimestamp` | ✅ Rejected before decode | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 21 | **Memo type / value mismatch** | Non-text memo, or text memo that differs from the quote | Memo type + value comparison | ✅ Rejected (`field: "memo"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+
+> No Horizon access is performed by these tests: envelopes are built on an
+> in-memory `Account` and signed with a freshly generated `Keypair`.
+
+---
+
 ## Summary
 
 | Status | Count |
 |--------|-------|
-| ✅ Covered | 10 |
+| ✅ Covered | 16 |
 | 🟡 Partial | 3 |
 | ❌ Uncovered | 2 |
 
