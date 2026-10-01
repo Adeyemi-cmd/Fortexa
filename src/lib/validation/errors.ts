@@ -38,7 +38,11 @@ export function toPublicValidationDetails(error: ZodError): PublicValidationDeta
   const flattened = error.flatten();
   const fieldErrors: Record<string, string[]> = {};
 
-  for (const [field, messages] of Object.entries(flattened.fieldErrors)) {
+  // `error.flatten()` is typed from the schema output (unknown here), which
+  // erases the runtime shape; re-widen it so field messages stay string[].
+  for (const [field, messages] of Object.entries(
+    flattened.fieldErrors as Record<string, string[] | undefined>,
+  )) {
     if (fieldPathHasSensitiveKey(field)) {
       fieldErrors[field] = [PUBLIC_SENSITIVE_FIELD_MESSAGE];
     } else {

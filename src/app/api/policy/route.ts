@@ -171,6 +171,35 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // A client can bypass the editor and POST here directly, so run the same
+    // rule-level check the validate route runs. A document the validate route
+    // rejects must never activate through this route either.
+    try {
+      validateNoDuplicateRules(parsed.data);
+    } catch (error) {
+      if (error instanceof DuplicateRuleError) {
+        logWarn("Policy update rejected: duplicate rule identifier", {
+          ...context,
+          userId: auth.session.userId,
+          field: error.field,
+          duplicateValue: error.value,
+        });
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: {
+            error: error.message,
+            code: "DUPLICATE_RULE_IDENTIFIER",
+            field: error.field,
+            duplicateValue: error.value,
+          },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+      throw error;
+    }
+
     const versionMeta = z.object({
       expectedVersion: z.number().int().positive().optional(),
     }).safeParse(bodyResult.data);
