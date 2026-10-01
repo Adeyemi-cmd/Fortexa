@@ -469,16 +469,39 @@ export async function getIdempotencyRecord(
   return raw ? normalizeFileRecord(raw, userId, idempotencyKey) : null;
 }
 
-/**
- * Claims `idempotencyKey` for `requestHash`, or reports why the caller must not
- * submit. A caller that receives `claimed` owns the submit; any other outcome
- * means the payment was already built by somebody else and must not be rebuilt.
- *
- * When an identical request is already in flight this waits (bounded by
- * `inFlightWaitMs`) for it to settle so the retry can return the original
- * result rather than a bare conflict.
- */
-export async function beginIdempotentSubmit(
+export async function getAllIdempotencyRecords(): Promise<SubmitIdempotencyRecord[]> {
+  const db = await runWithDatabase("getAllIdempotencyRecords", async (pool) => {
+    const result = await pool.query<{
+      user_id: string;
+      idempotency_key: string;
+      xdr_hash: string;
+      result: unknown;
+      created_at: string;
+    }>(
+      `
+        SELECT user_id, idempotency_key, xdr_hash, result, created_at
+        FROM fortexa_submit_idempotency
+      `
+    );
+
+    return result.rows.map((row) => ({
+      userId: row.user_id,
+      idempotencyKey: row.idempotency_key,
+      xdrHash: row.xdr_hash,
+      result: row.result,
+      createdAt: new Date(row.created_at).toISOString(),
+    }));
+  });
+
+  if (db.available) {
+    return db.value;
+  }
+
+  const store = await readStore();
+  return Object.values(store.records);
+}
+
+export async function putIdempotencyRecord(
   userId: string,
   idempotencyKey: string,
   requestHash: string,
