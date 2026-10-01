@@ -281,6 +281,15 @@ export function formatSubmitError(error: unknown) {
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/stellar/submit-signed");
+  let requestBody: unknown;
+  let requestBodyTooLarge = false;
+  const respond: typeof jsonWithRequestContext = (incoming, input) =>
+    jsonWithRequestContext(incoming, {
+      ...input,
+      logExchange: true,
+      requestBody,
+      requestBodyTooLarge,
+    });
 
   // Read the body before the gate so the signed transaction's destination
   // operations can be blocklist-checked in the same atomic enforcement step
@@ -304,13 +313,9 @@ export async function POST(request: NextRequest) {
     destination: gateDestination,
   });
 
-  if (!gate.ok) {
-    logWarn("Submit signed route blocked by enforcement gate", {
-      ...context,
-      gateCode: gate.code,
-    });
-    recordStellarSubmitResult("validation_failure");
-    return jsonWithRequestContext(request, {
+  if (!rate.ok) {
+    logWarn("Submit signed route rate limited", context);
+    return respond(request, {
       route: "/api/stellar/submit-signed",
       startedAtMs,
       status: gate.status,
@@ -334,12 +339,34 @@ export async function POST(request: NextRequest) {
       return auth.response;
     }
 
+    const readinessReport = getProtectedPaymentFlowReadinessReport();
+    if (readinessReport) {
+      logWarn("Submit signed blocked by production readiness check", context);
+      return respond(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 503,
+        body: {
+          error:
+            "Protected payment flows are disabled until Fortexa passes the production readiness check.",
+          issues: readinessReport.issues,
+          command: "npm run check:production-readiness",
+        },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     const userId = auth.session.userId;
 
     const bodyResult = await readJsonBody(request);
+    if (bodyResult.ok) {
+      requestBody = bodyResult.data;
+    }
+
     if (!bodyResult.ok) {
+      requestBodyTooLarge = true;
       logWarn("Submit signed payload too large", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 413,
@@ -359,7 +386,7 @@ export async function POST(request: NextRequest) {
         parsedPayload.error,
         bodyResult.data,
       );
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 400,
@@ -389,7 +416,7 @@ export async function POST(request: NextRequest) {
 
     if (assignedWallet && "expired" in assignedWallet) {
       logWarn("Submit signed wallet expired", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 401,
@@ -400,7 +427,7 @@ export async function POST(request: NextRequest) {
 
     if (!assignedWallet) {
       logWarn("Submit signed missing wallet mapping", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 401,
@@ -413,7 +440,7 @@ export async function POST(request: NextRequest) {
 
     if (!xdrSourceResult.ok) {
       logWarn("Submit signed XDR malformed", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 400,
@@ -425,20 +452,41 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (xdrSourceResult.sourceAccount !== sessionWallet) {
+    const receiptCheck = verifySignedXdrMatchesDecisionReceipt(
+      payload.signedXdr,
+      payload.decisionReceipt,
+    );
+    if (!receiptCheck.ok) {
+      logWarn("Submit signed XDR disagrees with decision receipt", {
+        ...context,
+        userId,
+        receiptHash: payload.decisionReceipt.receiptHash,
+        signedXdrHash: hashSignedXdr(payload.signedXdr),
+        field: receiptCheck.field,
+      });
+      recordStellarSubmitResult("decision_receipt_mismatch");
+      return respond(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: receiptCheck.status ?? 403,
+        body: {
+          error: receiptCheck.error,
+          field: receiptCheck.field,
+          receiptHash: payload.decisionReceipt.receiptHash,
+        },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    if (xdrSourceResult.sourceAccount !== assignedWallet.publicKey) {
       logWarn("Submit signed source wallet mismatch", {
         ...context,
         userId,
         expectedWallet: sessionWallet,
         actualSource: xdrSourceResult.sourceAccount,
       });
-    }
-
-    const parsedPayload = stellarSubmitSignedRequestSchema.safeParse(bodyResult.data);
-
-    if (!parsedPayload.success) {
-      logWarn("Submit signed validation failed", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      recordStellarSubmitResult("source_wallet_mismatch");
+      return respond(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 403,
@@ -481,7 +529,7 @@ export async function POST(request: NextRequest) {
           ...context,
           userId,
         });
-        return jsonWithRequestContext(request, {
+        return respond(request, {
           route: "/api/stellar/submit-signed",
           startedAtMs,
           status: 400,
@@ -511,7 +559,7 @@ export async function POST(request: NextRequest) {
           idempotencyKey,
         });
         recordStellarSubmitResult("idempotency_replay");
-        return jsonWithRequestContext(request, {
+        return respond(request, {
           route: "/api/stellar/submit-signed",
           startedAtMs,
           status: 200,
@@ -530,7 +578,7 @@ export async function POST(request: NextRequest) {
           idempotencyKey,
         });
         recordStellarSubmitResult("idempotency_conflict");
-        return jsonWithRequestContext(request, {
+        return respond(request, {
           route: "/api/stellar/submit-signed",
           startedAtMs,
           status: 409,
@@ -608,7 +656,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/stellar/submit-signed",
       startedAtMs,
       status: 200,
@@ -632,7 +680,7 @@ export async function POST(request: NextRequest) {
       horizonCategory: category,
     }));
     recordStellarSubmitResult("horizon_failure");
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/stellar/submit-signed",
       startedAtMs,
       status: 500,

@@ -11,8 +11,8 @@ const SENSITIVE_KEYS = new Set([
   "apikey",
   "secret",
   "token",
-  // #205: memo values carry free-text user content (invoice refs, payment
-  // context) and must never reach logs.
+  "password",
+  "challenge",
   "memo",
 ]);
 

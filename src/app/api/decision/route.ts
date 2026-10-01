@@ -30,6 +30,13 @@ import { decisionRequestSchema } from "@/lib/validation/schemas";
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/decision");
+  let requestBody: unknown;
+  const respond: typeof jsonWithRequestContext = (incoming, input) =>
+    jsonWithRequestContext(incoming, {
+      ...input,
+      logExchange: true,
+      requestBody,
+    });
 
   // Read the body before consuming the rate budget so the gate can check the
   // requested destination against the blocklist in the same atomic step.
@@ -58,12 +65,9 @@ export async function POST(request: NextRequest) {
     actionDomain: typeof rawActionDomain === "string" ? rawActionDomain : undefined,
   });
 
-  if (!gate.ok) {
-    logWarn("Decision route blocked by enforcement gate", {
-      ...context,
-      gateCode: gate.code,
-    });
-    return jsonWithRequestContext(request, {
+  if (!rate.ok) {
+    logWarn("Decision route rate limited", context);
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: gate.status,
@@ -87,22 +91,13 @@ export async function POST(request: NextRequest) {
 
     const userId = auth.session.userId;
 
-    const bodyResult = await readJsonBody(request);
-    if (!bodyResult.ok) {
-      logWarn("Decision payload too large", { ...context, userId });
-      return jsonWithRequestContext(request, {
-        route: "/api/decision",
-        startedAtMs,
-        status: 413,
-        body: { error: bodyResult.error },
-      });
-    }
-    const rawBody = bodyResult.data;
+    const rawBody = (await request.json().catch(() => ({}))) as unknown;
+    requestBody = rawBody;
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
-      logWarn("Decision route validation failed", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      logValidationFailure("Decision route validation failed", { ...context, userId }, parsedBody.error, rawBody);
+      return respond(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
@@ -125,7 +120,7 @@ export async function POST(request: NextRequest) {
 
     if (!action) {
       logWarn("Decision route action missing", { ...context, userId });
-      return jsonWithRequestContext(request, {
+      return respond(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
@@ -210,7 +205,7 @@ export async function POST(request: NextRequest) {
 
     recordDecisionOutcome(finalDecision);
 
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: 200,
@@ -239,7 +234,7 @@ export async function POST(request: NextRequest) {
       ...context,
       detail: redactedDetail,
     });
-    return jsonWithRequestContext(request, {
+    return respond(request, {
       route: "/api/decision",
       startedAtMs,
       status: 500,
