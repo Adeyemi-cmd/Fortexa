@@ -54,11 +54,32 @@ constants so any reviewer can reproduce the results.
 
 ---
 
+## Signed Payment Quote Verification — Evidence Fixtures
+
+Added by issue #206. These rows document the deterministic evidence cases for
+`verifySignedPaymentAgainstQuote`, which decodes a signed envelope locally (no
+Horizon call) and compares its single payment operation against the stored
+quote in integer stroops.
+
+| # | Evidence Case | What Is Asserted | Control Exercised | Expected Outcome | Test |
+|---|--------------|-----------------|-------------------|-----------------|------|
+| 16 | **Matching signed payment** | Asset, destination, memo text, and stroop amount all equal the quote | `verifySignedPaymentAgainstQuote` returns `{ ok: true }` | ✅ Accepted | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 17 | **One-stroop amount difference** | `10.0000000` authorized vs `10.0000001` signed | Integer-stroop amount comparison | ✅ Rejected (`field: "amountStroops"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 18 | **Extra bundled operation** | Quote authorized one payment; envelope carries two | `operations.length === 1` guard | ✅ Rejected (`field: "operations"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 19 | **Non-payment operation** | Only operation is `manageData`, not `payment` | Operation-type guard | ✅ Rejected (`field: "operations"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 20 | **Expired quote** | Signed after the quote TTL elapsed | `assertQuoteFreshAndPresent` via `validateRequestTimestamp` | ✅ Rejected before decode | `src/lib/stellar/verify-payment-quote.test.ts` |
+| 21 | **Memo type / value mismatch** | Non-text memo, or text memo that differs from the quote | Memo type + value comparison | ✅ Rejected (`field: "memo"`) | `src/lib/stellar/verify-payment-quote.test.ts` |
+
+> No Horizon access is performed by these tests: envelopes are built on an
+> in-memory `Account` and signed with a freshly generated `Keypair`.
+
+---
+
 ## Summary
 
 | Status | Count |
 |--------|-------|
-| ✅ Covered | 10 |
+| ✅ Covered | 16 |
 | 🟡 Partial | 3 |
 | ❌ Uncovered | 2 |
 

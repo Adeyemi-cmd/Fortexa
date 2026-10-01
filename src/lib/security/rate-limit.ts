@@ -1,10 +1,10 @@
 import type { NextRequest } from "next/server";
 
+import { recordRateLimitRejection } from "@/lib/observability/metrics";
 import {
   clearSharedRateLimits,
+  consumeSharedRateLimit,
   isSharedSecurityStateEnabled,
-  readSharedRateLimit,
-  writeSharedRateLimit,
 } from "@/lib/security/shared-security-state";
 
 type BucketConfig = {
@@ -18,7 +18,7 @@ type BucketState = {
   resetAt: number;
 };
 
-type RateLimitResult = {
+export type RateLimitResult = {
   ok: boolean;
   limit: number;
   remaining: number;
@@ -44,7 +44,35 @@ export async function consumeRateLimit(request: NextRequest, config: BucketConfi
   const bucketKey = `${config.key}:${ip}`;
   const useSharedState = isSharedSecurityStateEnabled();
 
-  const current = useSharedState ? await readSharedRateLimit(bucketKey) : buckets.get(bucketKey);
+  if (useSharedState) {
+    // Consume the slot atomically in the shared store: a read-then-write
+    // across an await lets two parallel requests both pass the last allowed
+    // slot (issue #202).
+    const { allowed, state } = await consumeSharedRateLimit(bucketKey, {
+      limit: config.limit,
+      windowMs: config.windowMs,
+    });
+
+    if (!allowed) {
+      return {
+        ok: false,
+        limit: config.limit,
+        remaining: 0,
+        retryAfterSeconds: Math.max(1, Math.ceil((state.resetAt - now) / 1000)),
+        resetAt: state.resetAt,
+      };
+    }
+
+    return {
+      ok: true,
+      limit: config.limit,
+      remaining: Math.max(0, config.limit - state.count),
+      retryAfterSeconds: 0,
+      resetAt: state.resetAt,
+    };
+  }
+
+  const current = buckets.get(bucketKey);
 
   if (!current || now >= current.resetAt) {
     const fresh: BucketState = {
@@ -52,11 +80,7 @@ export async function consumeRateLimit(request: NextRequest, config: BucketConfi
       resetAt: now + config.windowMs,
     };
 
-    if (useSharedState) {
-      await writeSharedRateLimit(bucketKey, fresh);
-    } else {
-      buckets.set(bucketKey, fresh);
-    }
+    buckets.set(bucketKey, fresh);
 
     return {
       ok: true,
@@ -68,6 +92,10 @@ export async function consumeRateLimit(request: NextRequest, config: BucketConfi
   }
 
   if (current.count >= config.limit) {
+    // Counted here (single choke point) so the ops dashboard and the metrics
+    // scrape report the same rejection count as the 429s actually returned.
+    recordRateLimitRejection();
+
     return {
       ok: false,
       limit: config.limit,
@@ -78,12 +106,7 @@ export async function consumeRateLimit(request: NextRequest, config: BucketConfi
   }
 
   current.count += 1;
-
-  if (useSharedState) {
-    await writeSharedRateLimit(bucketKey, current);
-  } else {
-    buckets.set(bucketKey, current);
-  }
+  buckets.set(bucketKey, current);
 
   return {
     ok: true,

@@ -16,6 +16,24 @@ export async function POST(request: NextRequest) {
     return auth.response;
   }
 
+  const clientIp = readClientIp(request.headers);
+  const lockState = await isLoginLocked(auth.session.userId, clientIp);
+  if (lockState.locked) {
+    logWarn("Auth refresh blocked by lockout", {
+      ...context,
+      userId: auth.session.userId,
+      ip: clientIp,
+    });
+    const retryAfterSeconds = Math.max(1, lockState.retryAfterSeconds);
+    return jsonWithRequestContext(request, {
+      route: "/api/auth/refresh",
+      startedAtMs,
+      status: 423,
+      body: { error: LOCKED_ERROR, retryAfterSeconds: retryAfterSeconds },
+      headers: { "Retry-After": String(retryAfterSeconds) },
+    });
+  }
+
   const token = createSessionToken({
     email: auth.session.email,
     role: auth.session.role,
@@ -35,20 +53,17 @@ export async function POST(request: NextRequest) {
         userId: auth.session.userId,
       },
     },
+    // The response rotates a session cookie, so it must never be cached.
+    noStore: true,
   });
 
-  response.cookies.set(AUTH_COOKIE_KEY, token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
-    path: "/",
-    maxAge: 60 * 60 * 24 * 7,
-  });
+  setSessionCookie(response, rotated.token);
 
   logInfo("Auth refresh success", {
     ...context,
     userId: auth.session.userId,
     role: auth.session.role,
+    generation: rotated.generation,
   });
 
   return response;

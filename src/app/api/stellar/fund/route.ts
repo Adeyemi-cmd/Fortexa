@@ -31,6 +31,6 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json(
     { error: "Friendbot funding has been removed from this project." },
-    { status: 410 }
+    { status: 410, headers: securityHeadersForRequest(request) }
   );
 }

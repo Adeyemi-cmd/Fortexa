@@ -14,12 +14,14 @@ export async function GET(request: NextRequest) {
   }
 
   const userId = auth.session.userId;
+  const networkConfig = resolveStellarNetworkConfig();
+  const network = networkConfig.ok ? networkConfig.profile : "mismatch";
   let assignedWallet = await getUserWallet(userId);
 
   if (assignedWallet && "expired" in assignedWallet) {
     return NextResponse.json(
       { error: "Session wallet mapping has expired." },
-      { status: 401 }
+      { status: 401, headers: securityHeadersForRequest(request) }
     );
   }
 
@@ -38,7 +40,7 @@ export async function GET(request: NextRequest) {
   let publicKey = assignedWallet?.publicKey;
 
   if (!publicKey || assignedWallet?.source !== "external") {
-    const sessionWallet = getWalletFromSession(auth.session);
+    const sessionWallet = await getWalletFromSession(auth.session);
     if (sessionWallet) {
       assignedWallet = await upsertUserWallet(userId, {
         publicKey: sessionWallet,
@@ -54,10 +56,10 @@ export async function GET(request: NextRequest) {
       {
         configured: false,
         userId,
-        network: "stellar-testnet",
+        network,
         message: "Link your Stellar wallet address to continue with real on-chain transactions.",
       },
-      { status: 200 }
+      { status: 200, headers: securityHeadersForRequest(request) }
     );
   }
 
@@ -75,10 +77,10 @@ export async function GET(request: NextRequest) {
       userId,
       source: assignedWallet.source,
       provider: assignedWallet.provider ?? "unknown",
-      network: "stellar-testnet",
+      network,
       publicKey,
       balance,
-    });
+    }, { headers: securityHeadersForRequest(request) });
   } catch (error) {
     return NextResponse.json(
       {
@@ -86,11 +88,11 @@ export async function GET(request: NextRequest) {
         userId,
         source: assignedWallet.source,
         provider: assignedWallet.provider ?? "unknown",
-        network: "stellar-testnet",
+        network,
         publicKey,
         error: error instanceof Error ? error.message : "Failed to load balance.",
       },
-      { status: 200 }
+      { status: 200, headers: securityHeadersForRequest(request) }
     );
   }
 }
