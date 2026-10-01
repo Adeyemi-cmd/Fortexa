@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
-import { revokeUserSessions } from "@/lib/auth/session-store";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { revokeUserWallet } from "@/lib/storage/user-wallet-store";
 
@@ -29,7 +28,6 @@ export async function DELETE(request: NextRequest) {
     const userId = auth.session.userId;
 
     await revokeUserWallet(userId);
-    revokeUserSessions(userId);
 
     return NextResponse.json(
       {

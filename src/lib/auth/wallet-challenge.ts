@@ -1,25 +1,22 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { Keypair } from "@stellar/stellar-sdk";
 
 import { normalizeWalletPublicKey } from "@/lib/auth/wallet-role";
 import {
   clearSharedChallenges,
-  isSharedSecurityStateEnabled,
-  takeSharedChallenge,
+  deleteSharedChallenge,
+  readSharedChallenge,
   writeSharedChallenge,
 } from "@/lib/security/shared-security-state";
 
 const SEP53_PREFIX = "Stellar Signed Message:\n";
-const DEFAULT_LOGIN_ORIGIN = "http://localhost";
 
 export type WalletChallengeRecord = {
   id: string;
   publicKey: string;
   message: string;
   expiresAtMs: number;
-  origin: string;
-  nonce: string;
 };
 
 type StoredChallenge = WalletChallengeRecord & {
@@ -27,38 +24,6 @@ type StoredChallenge = WalletChallengeRecord & {
 };
 
 const challenges = new Map<string, StoredChallenge>();
-const challengeVerificationLocks = new Map<string, Promise<void>>();
-const consumedLoginSignatures = new Set<string>();
-
-async function withChallengeVerificationLock<T>(challengeId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = challengeVerificationLocks.get(challengeId) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  const queued = previous.then(() => current);
-  challengeVerificationLocks.set(challengeId, queued);
-  await previous;
-
-  try {
-    return await operation();
-  } finally {
-    release?.();
-    if (challengeVerificationLocks.get(challengeId) === queued) {
-      challengeVerificationLocks.delete(challengeId);
-    }
-  }
-}
-
-/**
- * Whether a challenge is expired at `nowMs`.
- *
- * Expiry is inclusive: `expiresAtMs` is the first instant the challenge is invalid.
- */
-export function isChallengeExpired(expiresAtMs: number, nowMs: number = Date.now()) {
-  return expiresAtMs <= nowMs;
-}
 
 function getChallengeTtlSeconds() {
   const parsed = Number(process.env.FORTEXA_AUTH_CHALLENGE_TTL_SECONDS ?? 300);
@@ -72,43 +37,14 @@ export function buildChallengeMessage(input: {
   challengeId: string;
   publicKey: string;
   expiresAtMs: number;
-  origin: string;
-  nonce: string;
 }) {
   const expiresAt = new Date(input.expiresAtMs).toISOString();
   return [
     "Fortexa wallet login",
     `Challenge: ${input.challengeId}`,
     `Wallet: ${input.publicKey}`,
-    `Origin: ${input.origin}`,
-    `Nonce: ${input.nonce}`,
     `Expires: ${expiresAt}`,
   ].join("\n");
-}
-
-export function isWalletLoginMessage(value: string) {
-  return (
-    value.startsWith("Fortexa wallet login\n") &&
-    value.includes("\nOrigin: ") &&
-    value.includes("\nNonce: ") &&
-    value.includes("\nExpires: ")
-  );
-}
-
-export function isLoginAuthorizationPayload(value: unknown): boolean {
-  if (typeof value === "string") {
-    return isWalletLoginMessage(value) || consumedLoginSignatures.has(value);
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((item) => isLoginAuthorizationPayload(item));
-  }
-
-  if (value !== null && typeof value === "object") {
-    return Object.values(value as Record<string, unknown>).some((item) => isLoginAuthorizationPayload(item));
-  }
-
-  return false;
 }
 
 export function hashSep53Message(message: string) {
@@ -133,50 +69,49 @@ export function verifyWalletSignature(publicKey: string, message: string, signat
   }
 }
 
-async function takeChallenge(challengeId: string): Promise<StoredChallenge | undefined> {
-  if (isSharedSecurityStateEnabled()) {
-    const shared = await takeSharedChallenge(challengeId);
-    if (!shared) return undefined;
+async function readChallenge(challengeId: string): Promise<StoredChallenge | undefined> {
+  const shared = await readSharedChallenge(challengeId);
+  if (shared) {
     return {
       id: challengeId,
       publicKey: shared.publicKey,
       message: shared.message,
       expiresAtMs: shared.expiresAtMs,
-      origin: originFromMessage(shared.message),
-      nonce: nonceFromMessage(shared.message),
       consumed: shared.consumed,
     };
   }
 
-  const challenge = challenges.get(challengeId);
-  challenges.delete(challengeId);
-  return challenge;
+  return challenges.get(challengeId);
 }
 
-async function writeChallenge(record: StoredChallenge, ttlSeconds: number) {
-  if (isSharedSecurityStateEnabled()) {
-    await writeSharedChallenge(record.id, {
+async function writeChallenge(record: StoredChallenge) {
+  const ttlSeconds = Math.max(1, Math.ceil((record.expiresAtMs - Date.now()) / 1000));
+  await writeSharedChallenge(
+    record.id,
+    {
       publicKey: record.publicKey,
       message: record.message,
       expiresAtMs: record.expiresAtMs,
       consumed: record.consumed,
-    }, ttlSeconds);
-  } else {
-    challenges.set(record.id, record);
-  }
+    },
+    ttlSeconds
+  );
+  challenges.set(record.id, record);
 }
 
-export async function createWalletChallenge(publicKey: string, clock: () => number = Date.now): Promise<WalletChallengeRecord> {
+async function removeChallenge(challengeId: string) {
+  await deleteSharedChallenge(challengeId);
+  challenges.delete(challengeId);
+}
+
+export async function createWalletChallenge(publicKey: string): Promise<WalletChallengeRecord> {
   const normalizedKey = normalizeWalletPublicKey(publicKey);
   const challengeId = randomUUID();
-  const ttlSeconds = getChallengeTtlSeconds();
-  const expiresAtMs = clock() + ttlSeconds * 1000;
+  const expiresAtMs = Date.now() + getChallengeTtlSeconds() * 1000;
   const message = buildChallengeMessage({
     challengeId,
     publicKey: normalizedKey,
     expiresAtMs,
-    origin,
-    nonce,
   });
 
   const record: StoredChallenge = {
@@ -184,20 +119,16 @@ export async function createWalletChallenge(publicKey: string, clock: () => numb
     publicKey: normalizedKey,
     message,
     expiresAtMs,
-    origin,
-    nonce,
     consumed: false,
   };
 
-  await writeChallenge(record, ttlSeconds);
+  await writeChallenge(record);
 
   return {
     id: record.id,
     publicKey: record.publicKey,
     message: record.message,
     expiresAtMs: record.expiresAtMs,
-    origin: record.origin,
-    nonce: record.nonce,
   };
 }
 
@@ -209,49 +140,47 @@ export async function verifyWalletChallenge(input: {
   challengeId: string;
   publicKey: string;
   signature: string;
-}, clock: () => number = Date.now): Promise<ChallengeVerificationResult> {
-  return withChallengeVerificationLock(input.challengeId, async () => {
-    const normalizedKey = normalizeWalletPublicKey(input.publicKey);
-    const challenge = await takeChallenge(input.challengeId);
+}): Promise<ChallengeVerificationResult> {
+  const normalizedKey = normalizeWalletPublicKey(input.publicKey);
+  const challenge = await readChallenge(input.challengeId);
 
-    if (!challenge) {
-      return { ok: false, code: "missing" };
-    }
+  if (!challenge) {
+    return { ok: false, code: "missing" };
+  }
 
-    // The record has already been removed, including for every failure below.
-    if (isChallengeExpired(challenge.expiresAtMs, clock())) {
-      return { ok: false, code: "expired" };
-    }
+  if (challenge.publicKey !== normalizedKey) {
+    return { ok: false, code: "wallet_mismatch" };
+  }
 
-    if (challenge.publicKey !== normalizedKey) {
-      return { ok: false, code: "wallet_mismatch" };
-    }
+  if (challenge.expiresAtMs <= Date.now()) {
+    await removeChallenge(input.challengeId);
+    return { ok: false, code: "expired" };
+  }
 
-    if (challenge.consumed) {
-      return { ok: false, code: "replayed" };
-    }
+  if (challenge.consumed) {
+    return { ok: false, code: "replayed" };
+  }
 
-    if (!verifyWalletSignature(normalizedKey, challenge.message, input.signature)) {
-      return { ok: false, code: "invalid_signature" };
-    }
+  const signatureValid = verifyWalletSignature(normalizedKey, challenge.message, input.signature);
+  challenge.consumed = true;
+  await writeChallenge(challenge);
 
-    consumedLoginSignatures.add(input.signature);
-    return {
-      ok: true,
-      challenge: {
-        id: challenge.id,
-        publicKey: challenge.publicKey,
-        message: challenge.message,
-        expiresAtMs: challenge.expiresAtMs,
-        origin: challenge.origin,
-        nonce: challenge.nonce,
-      },
-    };
-  });
+  if (!signatureValid) {
+    return { ok: false, code: "invalid_signature" };
+  }
+
+  return {
+    ok: true,
+    challenge: {
+      id: challenge.id,
+      publicKey: challenge.publicKey,
+      message: challenge.message,
+      expiresAtMs: challenge.expiresAtMs,
+    },
+  };
 }
 
 export async function resetWalletChallengeStore() {
   challenges.clear();
-  consumedLoginSignatures.clear();
   await clearSharedChallenges();
 }

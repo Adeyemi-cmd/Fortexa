@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Loader2,
   Sparkles,
@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 
 import { DecisionBadge } from "@/components/decision-badge";
-import { DecisionResultView, type EngineDecisionResult } from "@/components/decision-result-view";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,7 +42,14 @@ const SIGN_ERROR_TITLES: Record<FreighterSignErrorCode, string> = {
 };
 
 type DecisionApiResponse = {
-  result: EngineDecisionResult;
+  result: {
+    decision: "APPROVE" | "WARN" | "REQUIRE_APPROVAL" | "BLOCK";
+    explanation: string;
+    riskScore: number;
+    requiresManualApproval?: boolean;
+    triggeredPolicies: Array<{ code: string; message: string }>;
+    riskFindings: Array<{ code: string; detail: string }>;
+  };
   auditEntry: {
     id: string;
     paymentQuote?: {
@@ -131,6 +137,13 @@ export function DecisionConsole() {
   const sendAmount =
     Number.isFinite(parsedExecuteAmount) && parsedExecuteAmount > 0 ? parsedExecuteAmount : evaluatedAmount;
   const destinationPreview = destination.trim().toUpperCase();
+
+  useEffect(() => {
+    if (step === 4 && evaluatedAmount != null && !executeAmount) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- seeds the prefill of a user-editable amount field
+      setExecuteAmount(String(evaluatedAmount));
+    }
+  }, [step, evaluatedAmount, executeAmount]);
 
   function resetPreparedXdr() {
     setUnsignedXdr("");
@@ -231,11 +244,7 @@ export function DecisionConsole() {
       setAuthorizedAuditEntryId(payload.auditEntry.id);
       setMessage("Decision recorded in audit trail.");
       pushToast("success", "Evaluation complete.");
-      const nextStep = payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4;
-      if (nextStep === 4 && evaluatedAmount != null && !executeAmount) {
-        setExecuteAmount(String(evaluatedAmount));
-      }
-      setStep(nextStep);
+      setStep(payload.result.decision === "REQUIRE_APPROVAL" ? 3 : payload.result.decision === "BLOCK" ? 2 : 4);
     } catch (error) {
       const err = error instanceof Error ? error.message : "Unexpected failure.";
       setMessage(err);
@@ -571,7 +580,21 @@ export function DecisionConsole() {
               Run evaluation
             </Button>
 
-            <DecisionResultView result={decisionData?.result} />
+            {decisionData ? (
+              <div className="space-y-4 rounded-xl border border-[hsl(var(--border))] p-5">
+                <div className="flex items-center justify-between">
+                  <DecisionBadge decision={decisionData.result.decision} />
+                  <div className="relative flex h-16 w-16 items-center justify-center">
+                    <div className="risk-ring absolute inset-0 rounded-full border-2 border-[hsl(var(--accent)/0.3)]" />
+                    <span className="text-lg font-semibold">{decisionData.result.riskScore}</span>
+                  </div>
+                </div>
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">{decisionData.result.explanation}</p>
+                {decisionData.result.decision === "BLOCK" ? (
+                  <p className="text-sm text-rose-300">Execution blocked. Select a different intent to continue.</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="flex justify-between">
               <Button variant="ghost" onClick={() => setStep(1)} className="gap-2">
@@ -595,7 +618,8 @@ export function DecisionConsole() {
           <CardContent className="space-y-4">
             {decisionData ? (
               <>
-                <DecisionResultView result={decisionData.result} />
+                <DecisionBadge decision={decisionData.result.decision} />
+                <p className="text-sm text-[hsl(var(--muted-foreground))]">{decisionData.result.explanation}</p>
                 <Button onClick={() => runDecision(true)} disabled={writeDisabled || !canHumanApprove} className="w-full">
                   Approve & continue
                 </Button>

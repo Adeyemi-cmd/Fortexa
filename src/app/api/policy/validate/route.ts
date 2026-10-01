@@ -2,20 +2,15 @@ import { NextResponse } from "next/server";
 
 import { DuplicateRuleError, validateNoDuplicateRules } from "@/lib/policy/engine";
 import { policyConfigSchema } from "@/lib/validation/schemas";
-import { toPublicValidationDetails } from "@/lib/validation/errors";
 
 /**
  * POST /api/policy/validate
  *
  * Validates a policy JSON against the schema without saving.
- * This is the single source of truth for policy activation: the editor must
- * receive `valid: true` here before it may POST to /api/policy.
+ * Useful for preview/diff functionality.
  *
  * Body: { policy: unknown }
- * Response:
- *   200 { valid: true, data }
- *   400 { valid: false, errors: string[], fieldErrors?: Record<string, string[]> }
- *   422 { valid: false, errors: string[], code, field, duplicateValue, fieldErrors }
+ * Response: { valid: boolean; data?: unknown; errors?: string[] }
  */
 export async function POST(request: Request) {
   try {
@@ -36,17 +31,15 @@ export async function POST(request: Request) {
     const result = policyConfigSchema.safeParse(policy);
 
     if (!result.success) {
-      const details = toPublicValidationDetails(result.error);
+      const errors = result.error.issues.map((issue) => ({
+        path: issue.path.join(".") || "root",
+        message: issue.message,
+      }));
 
       return NextResponse.json(
         {
           valid: false,
-          errors: result.error.issues.map(
-            (issue) => `${issue.path.join(".") || "root"}: ${issue.message}`,
-          ),
-          // Per-field errors keyed by path so the editor renders exactly
-          // what the API returned without re-deriving anything.
-          fieldErrors: details.fieldErrors,
+          errors: errors.map((e) => `${e.path}: ${e.message}`),
         },
         { status: 400 }
       );
@@ -64,7 +57,6 @@ export async function POST(request: Request) {
             code: "DUPLICATE_RULE_IDENTIFIER",
             field: error.field,
             duplicateValue: error.value,
-            fieldErrors: { [error.field]: [error.message] },
           },
           { status: 422 }
         );

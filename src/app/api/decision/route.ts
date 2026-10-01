@@ -24,7 +24,6 @@ import { getPolicyConfig } from "@/lib/storage/policy-store";
 import { buildPaymentQuoteFromDecision } from "@/lib/stellar/verify-payment-quote";
 import type { AuditEntry } from "@/lib/types/domain";
 import { decisionRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -82,14 +81,14 @@ export async function POST(request: NextRequest) {
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {
-      logValidationFailure("Decision route validation failed", { ...context, userId }, parsedBody.error, rawBody);
+      logWarn("Decision route validation failed", { ...context, userId });
       return jsonWithRequestContext(request, {
         route: "/api/decision",
         startedAtMs,
         status: 400,
         body: {
           error: "Invalid decision request body.",
-          details: toPublicValidationDetails(parsedBody.error),
+          details: parsedBody.error.flatten(),
         },
         headers: rateLimitHeaders(rate),
       });
@@ -144,18 +143,18 @@ export async function POST(request: NextRequest) {
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
-      ...(decision.reasonCode ? { reasonCode: decision.reasonCode } : {}),
-      ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
-      (body.paymentQuote || body.paymentQuoteInput)
-        ? {
-            paymentQuote: buildPaymentQuoteFromDecision({
-              destination: (body.paymentQuote || body.paymentQuoteInput)!.destination,
-              amountXLM: action.amountXLM,
-              memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
-              actionId: action.id,
-              network: (body.paymentQuote || body.paymentQuoteInput)!.network,
-            }),
-          }
+      ...(finalDecision === "APPROVE" || finalDecision === "WARN"
+        ? body.paymentQuoteInput
+          ? {
+              paymentQuote: buildPaymentQuoteFromDecision({
+                destination: body.paymentQuoteInput.destination,
+                amountXLM: action.amountXLM,
+                memo: body.paymentQuoteInput.memo,
+                actionId: action.id,
+                network: body.paymentQuoteInput.network,
+              }),
+            }
+          : {}
         : {}),
     };
 

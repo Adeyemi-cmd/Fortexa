@@ -9,6 +9,7 @@ export type StellarSubmitResult =
   | "validation_failure"
   | "idempotency_replay"
   | "idempotency_conflict"
+  | "idempotency_in_flight"
   | "source_wallet_mismatch";
 
 export const ALLOWED_ROUTES = new Set<string>([
@@ -63,6 +64,7 @@ export const ALLOWED_RESULTS: ReadonlySet<StellarSubmitResult> = new Set<Stellar
   "validation_failure",
   "idempotency_replay",
   "idempotency_conflict",
+  "idempotency_in_flight",
   "source_wallet_mismatch",
 ]);
 

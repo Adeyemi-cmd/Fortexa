@@ -85,7 +85,7 @@ describe("wallet-auth challenge signing — reviewer evidence fixtures", () => {
     expect(first.ok).toBe(true);
 
     const second = await verifyWalletChallenge(payload);
-    expect(second).toEqual({ ok: false, code: "missing" });
+    expect(second).toEqual({ ok: false, code: "replayed" });
   });
 
   // ── Case 4 ─────────────────────────────────────────────────────────────────

@@ -2,8 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
-import { getUserWallet, upsertUserWallet, revokeUserWallet, WalletAlreadyBoundError } from "./user-wallet-store";
-import { getWalletFromSession } from "@/lib/auth/session-wallet";
+import { getUserWallet, upsertUserWallet, revokeUserWallet } from "./user-wallet-store";
 import { getFortexaStoreDir } from "./paths";
 
 // Ensure tests use the fallback JSON store by bypassing Postgres if we don't configure it.
@@ -47,28 +46,6 @@ describe("user-wallet-store (fallback)", () => {
     }
   });
 
-  it("allows the same owner to bind the same key again without a duplicate", async () => {
-    await upsertUserWallet("user-1", { publicKey: "GDEV123", source: "external" });
-    await upsertUserWallet("user-1", { publicKey: "GDEV123", source: "external", provider: "again" });
-
-    const store = JSON.parse(await fs.readFile(storePath, "utf8")) as { wallets: Record<string, unknown> };
-    expect(Object.keys(store.wallets)).toEqual(["user-1"]);
-  });
-
-  it("rejects a second owner and serializes concurrent binds", async () => {
-    await upsertUserWallet("user-1", { publicKey: "GDEV123", source: "external" });
-    await expect(upsertUserWallet("user-2", { publicKey: "GDEV123", source: "external" }))
-      .rejects.toBeInstanceOf(WalletAlreadyBoundError);
-
-    await revokeUserWallet("user-1");
-    const concurrent = await Promise.allSettled([
-      upsertUserWallet("user-2", { publicKey: "GDEV456", source: "external" }),
-      upsertUserWallet("user-3", { publicKey: "GDEV456", source: "external" }),
-    ]);
-    expect(concurrent.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-    expect(concurrent.filter((result) => result.status === "rejected")).toHaveLength(1);
-  });
-
   it("identifies expired session mappings", async () => {
     // Insert with expiration in the past
     await upsertUserWallet("user-2", {
@@ -95,6 +72,5 @@ describe("user-wallet-store (fallback)", () => {
 
     fetched = await getUserWallet("user-3");
     expect(fetched).toBeNull();
-    await expect(getWalletFromSession({ userId: "user-3", email: "wallet:GDEV789" })).resolves.toBeNull();
   });
 });

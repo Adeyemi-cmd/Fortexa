@@ -1,43 +1,25 @@
 import { NextRequest } from "next/server";
-import { TransactionBuilder } from "@stellar/stellar-sdk";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { jsonWithRequestContext } from "@/lib/observability/http";
-import {
-  getRequestLogContext,
-  logError,
-  logInfo,
-  logWarn,
-} from "@/lib/observability/logger";
+import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { recordStellarSubmitResult } from "@/lib/observability/metrics";
 import { redactSensitiveFields } from "@/lib/observability/redact";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { submitSignedTransactionXdr } from "@/lib/stellar/client";
 import {
-  decodeSignedXdrSourceAccount,
-  submitSignedTransactionXdr,
-} from "@/lib/stellar/client";
-import { getStellarExplorerTransactionUrl } from "@/lib/stellar/network";
-import { assertStellarNetworkConfig } from "@/lib/stellar/network-config";
-import { validateDecisionReceipt } from "@/lib/stellar/verify-payment-quote";
-import {
-  getIdempotencyRecord,
-  hashSignedXdr,
+  abortIdempotentSubmit,
+  beginIdempotentSubmit,
+  completeIdempotentSubmit,
+  getIdempotencyInFlightWaitMs,
+  hashCanonicalPaymentBody,
   maybeRunCleanup,
-  putIdempotencyRecord,
 } from "@/lib/storage/submit-idempotency-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
-import { getAuditEntryById } from "@/lib/storage/audit-store";
-import {
-  stellarSubmitSignedRequestSchema,
-  validateIdempotencyKey,
-} from "@/lib/validation/schemas";
-import {
-  logValidationFailure,
-  toPublicValidationDetails,
-} from "@/lib/validation/errors";
+import { stellarSubmitSignedRequestSchema } from "@/lib/validation/schemas";
 import { normalizeHorizonError } from "@/lib/utils/horizonErrors";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 
@@ -49,8 +31,7 @@ type HorizonErrorContext = {
 const HORIZON_TX_ERRORS: Record<string, HorizonErrorContext> = {
   tx_bad_seq: {
     explanation: "The transaction sequence number is incorrect.",
-    nextStep:
-      "Refresh your wallet or account data to synchronize the sequence number and try again.",
+    nextStep: "Refresh your wallet or account data to synchronize the sequence number and try again.",
   },
   tx_insufficient_fee: {
     explanation: "The network fee provided is too low.",
@@ -72,137 +53,13 @@ const HORIZON_OP_ERRORS: Record<string, HorizonErrorContext> = {
     // address itself never reaches logs.
   },
   op_underfunded: {
-    explanation:
-      "The source account lacks sufficient funds for this operation.",
-    nextStep:
-      "Fund the source account with enough XLM to cover the payment and reserves.",
+    explanation: "The source account lacks sufficient funds for this operation.",
+    nextStep: "Fund the source account with enough XLM to cover the payment and reserves.",
   },
 };
 
-function verifySignedXdrMatchesDecisionReceipt(
-  signedXdr: string,
-  receipt: {
-    destination: string;
-    amountXLM: string;
-    asset: string;
-    memo?: string;
-    network: string;
-    receiptHash?: string;
-  },
-) {
-  const validation = validateDecisionReceipt(receipt as any);
-  if (!validation.ok) {
-    return {
-      ok: false,
-      status: 403,
-      error: validation.error,
-      field: validation.field,
-    };
-  }
-
-  const { networkPassphrase } = assertStellarNetworkConfig();
-  let decoded: ReturnType<typeof TransactionBuilder.fromXDR>;
-
-  try {
-    decoded = TransactionBuilder.fromXDR(signedXdr, networkPassphrase);
-  } catch {
-    return {
-      ok: false,
-      status: 400,
-      error:
-        "Signed XDR could not be decoded. It may be malformed or built for the wrong network.",
-    };
-  }
-
-  const paymentOp = decoded.operations.find((op: any) => op.type === "payment");
-  if (!paymentOp || paymentOp.type !== "payment") {
-    return {
-      ok: false,
-      status: 403,
-      error: "Signed transaction is not a payment operation.",
-      field: "destination",
-    };
-  }
-
-  const network =
-    networkPassphrase === "Test SDF Network ; September 2015"
-      ? "testnet"
-      : "testnet";
-  const actual = {
-    destination: paymentOp.destination?.trim().toUpperCase(),
-    amountXLM: String(paymentOp.amount ?? "0"),
-    asset: "native",
-    memo: decoded.memo?.type === "text" ? String(decoded.memo.value ?? "") : "",
-    network,
-  };
-
-  if (actual.destination !== validation.normalized.destination) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction destination does not match the authorized payment decision receipt.",
-      field: "destination",
-    };
-  }
-
-  if (String(validation.normalized.amountXLM) !== String(actual.amountXLM)) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction amount does not match the authorized payment decision receipt.",
-      field: "amountXLM",
-    };
-  }
-
-  if (actual.asset !== validation.normalized.asset) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction asset does not match the authorized payment decision receipt.",
-      field: "asset",
-    };
-  }
-
-  const normalizedMemo = actual.memo.slice(0, 28);
-  if (normalizedMemo !== validation.normalized.memo) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction memo does not match the authorized payment decision receipt.",
-      field: "memo",
-    };
-  }
-
-  if (actual.network !== validation.normalized.network) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction network does not match the authorized payment decision receipt.",
-      field: "network",
-    };
-  }
-
-  const expectedHash = validation.normalized.receiptHash;
-  if (
-    expectedHash &&
-    receipt.receiptHash &&
-    expectedHash !== receipt.receiptHash
-  ) {
-    return {
-      ok: false,
-      status: 403,
-      error:
-        "Signed transaction does not match the authorized payment decision receipt.",
-      field: "amountXLM",
-    };
-  }
-
-  return { ok: true };
+function getTestnetExplorerUrl(hash: string) {
+  return `https://stellar.expert/explorer/testnet/tx/${hash}`;
 }
 
 export function formatSubmitError(error: unknown) {
@@ -260,6 +117,10 @@ export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/stellar/submit-signed");
 
+  // Set once this request owns the idempotency key, so a failed submit only ever
+  // releases its own claim.
+  let claimedIdempotency: { userId: string; key: string; requestHash: string } | null = null;
+
   const rate = await consumeRateLimit(request, {
     key: "stellar-submit-signed",
     limit: 30,
@@ -287,73 +148,7 @@ export async function POST(request: NextRequest) {
       return auth.response;
     }
 
-    const readinessReport = getProtectedPaymentFlowReadinessReport();
-    if (readinessReport) {
-      logWarn("Submit signed blocked by production readiness check", context);
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 503,
-        body: {
-          error:
-            "Protected payment flows are disabled until Fortexa passes the production readiness check.",
-          issues: readinessReport.issues,
-          command: "npm run check:production-readiness",
-        },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
     const userId = auth.session.userId;
-
-    const bodyResult = await readJsonBody(request);
-    if (bodyResult.ok && isLoginAuthorizationPayload(bodyResult.data)) {
-      logWarn("Submit signed rejected login payload", { ...context, userId, code: "login_payload" });
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 400,
-        body: { error: "Login signatures cannot authorize a payment." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    if (!bodyResult.ok) {
-      logWarn("Submit signed payload too large", { ...context, userId });
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 413,
-        body: { error: bodyResult.error },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const parsedPayload = stellarSubmitSignedRequestSchema.safeParse(
-      bodyResult.data,
-    );
-
-    if (!parsedPayload.success) {
-      logValidationFailure(
-        "Submit signed validation failed",
-        { ...context, userId },
-        parsedPayload.error,
-        bodyResult.data,
-      );
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 400,
-        body: {
-          error: "Invalid signed transaction submission.",
-          details: toPublicValidationDetails(parsedPayload.error),
-        },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const payload = parsedPayload.data;
-
     const assignedWallet = await getUserWallet(userId);
 
     if (assignedWallet && "expired" in assignedWallet) {
@@ -367,78 +162,35 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (!assignedWallet) {
-      logWarn("Submit signed missing wallet mapping", { ...context, userId });
+    const bodyResult = await readJsonBody(request);
+    if (!bodyResult.ok) {
+      logWarn("Submit signed payload too large", { ...context, userId });
       return jsonWithRequestContext(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
-        status: 401,
-        body: { error: "No session wallet mapping found for this user." },
+        status: 413,
+        body: { error: bodyResult.error },
         headers: rateLimitHeaders(rate),
       });
     }
 
-    const xdrSourceResult = decodeSignedXdrSourceAccount(payload.signedXdr);
+    const parsedPayload = stellarSubmitSignedRequestSchema.safeParse(bodyResult.data);
 
-    if (!xdrSourceResult.ok) {
-      logWarn("Submit signed XDR malformed", { ...context, userId });
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: 400,
-        body: {
-          error:
-            "Signed XDR could not be decoded. It may be malformed or built for the wrong network.",
-        },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    const receiptCheck = verifySignedXdrMatchesDecisionReceipt(
-      payload.signedXdr,
-      payload.decisionReceipt,
-    );
-    if (!receiptCheck.ok) {
-      logWarn("Submit signed XDR disagrees with decision receipt", {
-        ...context,
-        userId,
-        receiptHash: payload.decisionReceipt.receiptHash,
-        signedXdrHash: hashSignedXdr(payload.signedXdr),
-        field: receiptCheck.field,
-      });
-      recordStellarSubmitResult("decision_receipt_mismatch");
-      return jsonWithRequestContext(request, {
-        route: "/api/stellar/submit-signed",
-        startedAtMs,
-        status: receiptCheck.status ?? 403,
-        body: {
-          error: receiptCheck.error,
-          field: receiptCheck.field,
-          receiptHash: payload.decisionReceipt.receiptHash,
-        },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
-    if (xdrSourceResult.sourceAccount !== assignedWallet.publicKey) {
-      logWarn("Submit signed source wallet mismatch", {
-        ...context,
-        userId,
-        expectedWallet: assignedWallet.publicKey,
-        actualSource: xdrSourceResult.sourceAccount,
-      });
-      recordStellarSubmitResult("source_wallet_mismatch");
+    if (!parsedPayload.success) {
+      logWarn("Submit signed validation failed", { ...context, userId });
       return jsonWithRequestContext(request, {
         route: "/api/stellar/submit-signed",
         startedAtMs,
         status: 400,
         body: {
-          error:
-            "Signed transaction source account does not match your session wallet.",
+          error: "Invalid signed transaction submission.",
+          details: parsedPayload.error.flatten(),
         },
         headers: rateLimitHeaders(rate),
       });
     }
+
+    const payload = parsedPayload.data;
 
     if (!xdrSourceResult.payment) {
       return jsonWithRequestContext(request, {
@@ -477,74 +229,86 @@ export async function POST(request: NextRequest) {
 
     const headerKey = request.headers.get("idempotency-key")?.trim();
     const bodyKey = payload.idempotencyKey?.trim();
-    const mergedIdempotencyKey =
-      headerKey && headerKey.length > 0 ? headerKey : bodyKey;
+    const idempotencyKey = headerKey && headerKey.length > 0 ? headerKey : bodyKey;
 
-    let idempotencyKey: string | undefined;
-    if (mergedIdempotencyKey) {
-      const idempotencyValidation =
-        validateIdempotencyKey(mergedIdempotencyKey);
-      if (!idempotencyValidation.ok) {
-        logWarn("Submit signed invalid idempotency key", {
-          ...context,
-          userId,
-        });
-        return jsonWithRequestContext(request, {
-          route: "/api/stellar/submit-signed",
-          startedAtMs,
-          status: 400,
-          body: { error: idempotencyValidation.error },
-          headers: rateLimitHeaders(rate),
-        });
-      }
-      idempotencyKey = idempotencyValidation.key;
+    if (idempotencyKey && (idempotencyKey.length < 8 || idempotencyKey.length > 255)) {
+      logWarn("Submit signed invalid idempotency key", { ...context, userId });
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 400,
+        body: { error: "Idempotency-Key must be between 8 and 255 characters." },
+        headers: rateLimitHeaders(rate),
+      });
     }
 
-    const xdrHash = idempotencyKey ? hashSignedXdr(payload.signedXdr) : null;
+    // Identity of the request is the hash of the key plus the canonical payment
+    // body, so the store and this route can never disagree about what "the same
+    // request" means.
+    const requestHash = idempotencyKey
+      ? hashCanonicalPaymentBody(idempotencyKey, payload)
+      : null;
 
-    if (idempotencyKey && xdrHash) {
-      const existing = await getIdempotencyRecord(userId, idempotencyKey);
+    if (idempotencyKey && requestHash) {
+      const claim = await beginIdempotentSubmit(userId, idempotencyKey, requestHash, {
+        inFlightWaitMs: getIdempotencyInFlightWaitMs(),
+      });
 
-      if (existing && existing.xdrHash === xdrHash) {
-        logInfo("Signed transaction idempotent replay", {
-          ...context,
-          userId,
-          idempotencyKey,
-        });
-        recordStellarSubmitResult("idempotency_replay");
-        return jsonWithRequestContext(request, {
-          route: "/api/stellar/submit-signed",
-          startedAtMs,
-          status: 200,
-          body: existing.result,
-          headers: {
-            ...rateLimitHeaders(rate),
-            "Idempotency-Replayed": "true",
-          },
-        });
-      }
-
-      if (existing) {
-        logWarn("Signed transaction idempotency conflict", {
-          ...context,
-          userId,
-          idempotencyKey,
-        });
+      if (claim.outcome === "conflict") {
+        logWarn("Signed transaction idempotency conflict", { ...context, userId, idempotencyKey });
         recordStellarSubmitResult("idempotency_conflict");
         return jsonWithRequestContext(request, {
           route: "/api/stellar/submit-signed",
           startedAtMs,
           status: 409,
           body: {
-            error:
-              "Idempotency-Key was already used with a different signed transaction.",
+            error: "Idempotency-Key was already used with a different signed transaction.",
+          },
+          headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "false" },
+        });
+      }
+
+      if (claim.outcome === "in_flight") {
+        logWarn("Signed transaction idempotency in flight", {
+          ...context,
+          userId,
+          idempotencyKey,
+        });
+        recordStellarSubmitResult("idempotency_in_flight");
+        return jsonWithRequestContext(request, {
+          route: "/api/stellar/submit-signed",
+          startedAtMs,
+          status: 409,
+          body: {
+            error: "An identical submit for this idempotency key is still in progress.",
+            code: "idempotency_in_flight",
           },
           headers: {
             ...rateLimitHeaders(rate),
             "Idempotency-Replayed": "false",
+            "Retry-After": "1",
           },
         });
       }
+
+      if (claim.outcome === "replay") {
+        logInfo("Signed transaction idempotent replay", {
+          ...context,
+          userId,
+          idempotencyKey,
+          transactionHash: claim.record.transactionId,
+        });
+        recordStellarSubmitResult("idempotency_replay");
+        return jsonWithRequestContext(request, {
+          route: "/api/stellar/submit-signed",
+          startedAtMs,
+          status: claim.record.statusCode ?? 200,
+          body: claim.record.result,
+          headers: { ...rateLimitHeaders(rate), "Idempotency-Replayed": "true" },
+        });
+      }
+
+      claimedIdempotency = { userId, key: idempotencyKey, requestHash };
     }
 
     const submitted = await submitSignedTransactionXdr(payload.signedXdr);
@@ -561,18 +325,35 @@ export async function POST(request: NextRequest) {
     const responseBody = {
       ok: true,
       userId,
+      transactionHash: submitted.hash,
       payment: {
         mode: "real",
         ...submitted,
       },
-      explorerUrl: getStellarExplorerTransactionUrl(submitted.hash),
+      explorerUrl: getTestnetExplorerUrl(submitted.hash),
     };
 
-    if (idempotencyKey && xdrHash) {
-      await putIdempotencyRecord(userId, idempotencyKey, {
-        xdrHash,
-        result: responseBody,
-      });
+    if (claimedIdempotency) {
+      const claim = claimedIdempotency;
+      claimedIdempotency = null;
+
+      try {
+        await completeIdempotentSubmit(userId, claim.key, claim.requestHash, {
+          statusCode: 200,
+          transactionId: submitted.hash,
+          result: responseBody,
+        });
+      } catch (settleError) {
+        // The transaction is already on the ledger, so the claim is deliberately
+        // left in flight instead of being released: releasing it would invite a
+        // retry to resubmit. The lease expiry is what recovers the key.
+        logError("Submit signed idempotency settle failed", {
+          ...context,
+          userId,
+          idempotencyKey: claim.key,
+          detail: settleError instanceof Error ? settleError.message : "unknown",
+        });
+      }
     }
 
     return jsonWithRequestContext(request, {
@@ -584,7 +365,17 @@ export async function POST(request: NextRequest) {
         ? { ...rateLimitHeaders(rate), "Idempotency-Replayed": "false" }
         : rateLimitHeaders(rate),
     });
-  } catch (error) {
+
+} catch (error) {
+    if (claimedIdempotency) {
+      const claim = claimedIdempotency;
+      claimedIdempotency = null;
+      // Nothing was settled, so free the key and let the client retry.
+      await abortIdempotentSubmit(claim.userId, claim.key, claim.requestHash).catch(
+        () => undefined
+      );
+    }
+
     const formatted = formatSubmitError(error);
     const category = normalizeHorizonError(formatted.txCode);
     // #205: formatSubmitError embeds raw Horizon error.message (which can carry

@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
   let publicKey = assignedWallet?.publicKey;
 
   if (!publicKey || assignedWallet?.source !== "external") {
-    const sessionWallet = await getWalletFromSession(auth.session);
+    const sessionWallet = getWalletFromSession(auth.session);
     if (sessionWallet) {
       assignedWallet = await upsertUserWallet(userId, {
         publicKey: sessionWallet,

@@ -2,17 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
 import { readJsonBody } from "@/lib/http/read-json-body";
-import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
-import {
-  logValidationFailure,
-  toPublicValidationDetails,
-} from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
   const rate = await consumeRateLimit(request, {
@@ -35,26 +30,13 @@ export async function POST(request: NextRequest) {
       return auth.response;
     }
 
-    const readinessReport = getProtectedPaymentFlowReadinessReport();
-    if (readinessReport) {
-      return NextResponse.json(
-        {
-          error:
-            "Protected payment flows are disabled until Fortexa passes the production readiness check.",
-          issues: readinessReport.issues,
-          command: "npm run check:production-readiness",
-        },
-        { status: 503, headers: rateLimitHeaders(rate) },
-      );
-    }
-
     const userId = auth.session.userId;
     const assignedWallet = await getUserWallet(userId);
 
     if (assignedWallet && "expired" in assignedWallet) {
       return NextResponse.json(
         { error: "Session wallet mapping has expired." },
-        { status: 401, headers: rateLimitHeaders(rate) },
+        { status: 401, headers: rateLimitHeaders(rate) }
       );
     }
 
@@ -66,21 +48,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(
-      bodyResult.data,
-    );
+    const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
 
     if (!parsedPayload.success) {
-      logValidationFailure(
-        "Stellar build payment validation failed",
-        { route: "/api/stellar/build-payment", userId },
-        parsedPayload.error,
-        bodyResult.data,
-      );
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
-          details: toPublicValidationDetails(parsedPayload.error),
+          details: parsedPayload.error.flatten(),
         },
         { status: 400, headers: rateLimitHeaders(rate) },
       );
@@ -107,7 +81,6 @@ export async function POST(request: NextRequest) {
       asset: payload.asset,
       memo: payload.memo,
       network: payload.network,
-      requestTimestampMs: payload.requestTimestampMs,
     });
 
     if (!verification.ok) {
@@ -138,8 +111,6 @@ export async function POST(request: NextRequest) {
         sourcePublicKey,
         xdr: unsigned.xdr,
         networkPassphrase: unsigned.networkPassphrase,
-        decisionReceipt: verification.quote,
-        paymentQuote: verification.quote,
       },
       { headers: rateLimitHeaders(rate) },
     );
