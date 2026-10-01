@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   checkProductionReadiness,
+  evaluateServiceReadiness,
   formatProductionReadinessReport,
   getProtectedPaymentFlowReadinessReport,
 } from "@/lib/readiness/production";
@@ -12,15 +13,14 @@ const VALID_OPERATOR_WALLET =
 
 describe("production readiness", () => {
   it("passes for a valid production configuration", () => {
-    const report = checkProductionReadiness(
-      {
+    const report = checkProductionReadiness({
         DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
         STELLAR_HORIZON_URL: "https://horizon.stellar.org",
         STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
-      },
+      } as unknown as NodeJS.ProcessEnv,
       { cwd: "/srv/fortexa" }
     );
 
@@ -29,7 +29,7 @@ describe("production readiness", () => {
   });
 
   it("reports missing required production variables", () => {
-    const report = checkProductionReadiness({}, { cwd: "/srv/fortexa" });
+    const report = checkProductionReadiness({} as unknown as NodeJS.ProcessEnv, { cwd: "/srv/fortexa" });
 
     expect(report.ok).toBe(false);
     expect(report.issues.map((issue) => issue.setting)).toEqual(
@@ -45,15 +45,14 @@ describe("production readiness", () => {
   });
 
   it("rejects the wrong Stellar network passphrase for production", () => {
-    const report = checkProductionReadiness(
-      {
+    const report = checkProductionReadiness({
         DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
         STELLAR_HORIZON_URL: "https://horizon.stellar.org",
         STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
-      },
+      } as unknown as NodeJS.ProcessEnv,
       { cwd: "/srv/fortexa" }
     );
 
@@ -68,14 +67,13 @@ describe("production readiness", () => {
   });
 
   it("rejects missing storage backend configuration", () => {
-    const report = checkProductionReadiness(
-      {
+    const report = checkProductionReadiness({
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
         STELLAR_HORIZON_URL: "https://horizon.stellar.org",
         STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
-      },
+      } as unknown as NodeJS.ProcessEnv,
       { cwd: "/srv/fortexa" }
     );
 
@@ -91,15 +89,14 @@ describe("production readiness", () => {
   });
 
   it("rejects unsafe demo defaults for Horizon and file storage", () => {
-    const report = checkProductionReadiness(
-      {
+    const report = checkProductionReadiness({
         FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
         FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
         FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
         FORTEXA_STORE_DIR: ".fortexa",
         STELLAR_HORIZON_URL: "https://horizon-testnet.stellar.org",
         STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
-      },
+      } as unknown as NodeJS.ProcessEnv,
       { cwd: "/srv/fortexa" }
     );
 
@@ -122,10 +119,9 @@ describe("production readiness", () => {
   });
 
   it("formats actionable output without exposing secret values", () => {
-    const report = checkProductionReadiness(
-      {
+    const report = checkProductionReadiness({
         FORTEXA_AUTH_SECRET: "too-short-secret",
-      },
+      } as unknown as NodeJS.ProcessEnv,
       { cwd: "/srv/fortexa" }
     );
 
@@ -141,5 +137,141 @@ describe("production readiness", () => {
     });
 
     expect(report).toBeNull();
+  });
+
+  it("passes for a consistent production fixture", () => {
+    const report = checkProductionReadiness({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      } as unknown as NodeJS.ProcessEnv,
+      { cwd: "/srv/fortexa", appliedMigrationId: "006_audit_chain_sequence" }
+    );
+
+    expect(report.ok).toBe(true);
+    expect(report.issues).toEqual([]);
+  });
+
+  it("rejects testnet passphrase in production mode", () => {
+    const report = checkProductionReadiness({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET,
+      } as unknown as NodeJS.ProcessEnv,
+      { cwd: "/srv/fortexa", appliedMigrationId: "006_audit_chain_sequence" }
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          setting: "NODE_ENV, STELLAR_NETWORK_PASSPHRASE",
+        }),
+      ])
+    );
+  });
+
+  it("rejects stale migration in production mode", () => {
+    const report = checkProductionReadiness({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+        FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+        FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+        FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+        STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+        STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+      } as unknown as NodeJS.ProcessEnv,
+      { cwd: "/srv/fortexa", appliedMigrationId: "001_initial_storage" }
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          setting: "NODE_ENV, fortexa_schema_migrations",
+        }),
+      ])
+    );
+  });
+});
+
+describe("service readiness", () => {
+  const productionEnv = {
+    NODE_ENV: "production",
+    DATABASE_URL: "postgres://fortexa:secret@db.example.com:5432/fortexa",
+    FORTEXA_AUTH_SECRET: "0123456789abcdef0123456789abcdef",
+    FORTEXA_OPERATOR_WALLETS: VALID_OPERATOR_WALLET,
+    FORTEXA_SHARED_STATE_PATH: "shared/security-state.json",
+    STELLAR_HORIZON_URL: "https://horizon.stellar.org",
+    STELLAR_NETWORK_PASSPHRASE: Networks.PUBLIC,
+  } as NodeJS.ProcessEnv;
+
+  it("is ready when config, the configured database, and Horizon all pass", () => {
+    const readiness = evaluateServiceReadiness({
+      env: productionEnv,
+      cwd: "/srv/fortexa",
+      databaseAvailable: true,
+      horizonStatus: "healthy",
+    });
+
+    expect(readiness).toEqual({
+      ready: true,
+      checks: [
+        { name: "production_config", ok: true },
+        { name: "storage", ok: true },
+        { name: "horizon", ok: true },
+      ],
+      failingChecks: [],
+    });
+  });
+
+  it("fails production_config exactly when the payment routes would refuse", () => {
+    const unsafeEnv = { ...productionEnv, STELLAR_NETWORK_PASSPHRASE: Networks.TESTNET } as NodeJS.ProcessEnv;
+
+    expect(getProtectedPaymentFlowReadinessReport(unsafeEnv, { cwd: "/srv/fortexa" })).not.toBeNull();
+    expect(
+      evaluateServiceReadiness({ env: unsafeEnv, cwd: "/srv/fortexa", databaseAvailable: true, horizonStatus: "healthy" })
+        .failingChecks
+    ).toEqual(["production_config"]);
+
+    // Outside production the payment routes do not enforce config, so neither does readiness.
+    const devEnv = { ...unsafeEnv, NODE_ENV: "development" } as NodeJS.ProcessEnv;
+    expect(getProtectedPaymentFlowReadinessReport(devEnv)).toBeNull();
+    expect(evaluateServiceReadiness({ env: devEnv, databaseAvailable: true, horizonStatus: "healthy" }).ready).toBe(
+      true
+    );
+  });
+
+  it("fails storage only when a configured database does not answer", () => {
+    const down = evaluateServiceReadiness({
+      env: { NODE_ENV: "test", DATABASE_URL: "postgres://db" } as NodeJS.ProcessEnv,
+      databaseAvailable: false,
+      horizonStatus: "unknown",
+    });
+    expect(down.failingChecks).toEqual(["storage"]);
+
+    const fileStore = evaluateServiceReadiness({
+      env: { NODE_ENV: "test" } as NodeJS.ProcessEnv,
+      databaseAvailable: false,
+      horizonStatus: "unknown",
+    });
+    expect(fileStore.ready).toBe(true);
+  });
+
+  it("fails horizon only when a configured Horizon is degraded", () => {
+    const env = { NODE_ENV: "test" } as NodeJS.ProcessEnv;
+
+    expect(
+      evaluateServiceReadiness({ env, databaseAvailable: false, horizonStatus: "degraded" }).failingChecks
+    ).toEqual(["horizon"]);
+    expect(evaluateServiceReadiness({ env, databaseAvailable: false, horizonStatus: "unknown" }).ready).toBe(true);
   });
 });

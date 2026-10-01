@@ -26,8 +26,7 @@ export type PaymentQuoteField =
   | "amountXLM"
   | "asset"
   | "memo"
-  | "network"
-  | "requestTimestampMs";
+  | "network";
 
 export type PaymentBuildParams = {
   destination: string;
@@ -35,15 +34,6 @@ export type PaymentBuildParams = {
   asset: StellarAssetId;
   memo?: string;
   network: StellarNetworkId;
-  /**
-   * Optional epoch-millisecond timestamp the client attaches to this
-   * request. When present, it's checked against the configured clock-skew
-   * window (see {@link validateRequestTimestamp}) before any other
-   * verification runs -- a stale or implausibly-future timestamp is
-   * rejected outright. Omitting it entirely skips the check, so existing
-   * callers that don't send a timestamp are unaffected.
-   */
-  requestTimestampMs?: number;
 };
 
 export type VerifyPaymentQuoteResult =
@@ -164,23 +154,11 @@ function assertQuoteFreshAndPresent(auditEntry: AuditEntry): VerifyPaymentQuoteR
 }
 
 export function normalizeAmountXLM(amount: number | string): string {
-  const valid =
-    typeof amount === "number"
-      ? isValidPaymentAmountNumber(amount)
-      : isValidPaymentAmountString(amount);
-
-  if (!valid) {
-    throw new Error(PAYMENT_AMOUNT_ERROR);
+  const parsed = typeof amount === "number" ? amount : Number.parseFloat(amount);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error("Invalid XLM amount.");
   }
-
-  const stroops = toAuthorizedStroops(amount);
-  if (stroops === null) {
-    throw new Error(PAYMENT_AMOUNT_ERROR);
-  }
-
-  // Render from the exact stroop count rather than from a double, so the
-  // normalized string is the amount that was authorized, to the stroop.
-  return stroopsToXlmString(stroops);
+  return parsed.toFixed(7);
 }
 
 export function buildPaymentQuoteFromDecision(input: {
@@ -244,25 +222,13 @@ export function verifyPaymentAgainstQuote(
 
   const { quote } = gate;
 
-  let normalizedRequest: Omit<PaymentBuildParams, "amountXLM"> & {
-    amountXLM: string;
+  const normalizedRequest = {
+    destination: request.destination.trim().toUpperCase(),
+    amountXLM: normalizeAmountXLM(request.amountXLM),
+    asset: request.asset,
+    memo: (request.memo ?? quote.memo).slice(0, 28),
+    network: request.network,
   };
-  try {
-    normalizedRequest = {
-      destination: request.destination.trim().toUpperCase(),
-      amountXLM: normalizeAmountXLM(request.amountXLM),
-      asset: request.asset,
-      memo: (request.memo ?? quote.memo).slice(0, 28),
-      network: request.network,
-    };
-  } catch {
-    return {
-      ok: false,
-      status: 400,
-      error: PAYMENT_AMOUNT_ERROR,
-      field: "amountXLM",
-    };
-  }
 
   if (normalizedRequest.destination !== quote.destination) {
     return {

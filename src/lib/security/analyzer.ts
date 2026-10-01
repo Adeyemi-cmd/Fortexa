@@ -4,30 +4,7 @@ import type {
   SecurityEvaluation,
   SecurityFinding,
 } from "@/lib/types/domain";
-import {
-  fetchBlocklist,
-  getBlocklistHealth,
-} from "@/lib/security/blocklist";
-
-/** Configuration for analyzer timeout behavior. */
-export interface AnalyzerConfig {
-  blocklistTimeoutMs: number;
-}
-
-/** Default analyzer configuration - 5 second timeout for blocklist fetch. */
-export const defaultAnalyzerConfig: AnalyzerConfig = {
-  blocklistTimeoutMs: 5000,
-};
-
-/** Get analyzer config from environment or use defaults. */
-function getAnalyzerConfig(): AnalyzerConfig {
-  return {
-    blocklistTimeoutMs: parseInt(
-      process.env.FORTEXA_BLOCKLIST_TIMEOUT_MS || "5000",
-      10,
-    ),
-  };
-}
+import { fetchBlocklist } from "@/lib/security/blocklist";
 
 const suspiciousPatterns = [
   /ignore\s+all\s+previous\s+instructions/i,
@@ -100,7 +77,7 @@ function outputSafetyCheck(outputPreview?: string): SecurityFinding[] {
     }
   }
 
-  if (/private key|secret key|secret seed|mnemonic/i.test(outputPreview)) {
+  if (/private key|secret seed|mnemonic/i.test(outputPreview)) {
     findings.push({
       code: "SECRET_TARGETING",
       title: "Sensitive secret extraction attempt",
@@ -157,55 +134,47 @@ function blocklistCheck(
   return [];
 }
 
+function isTimeoutFailure(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout/i.test(message);
+}
+
 /**
- * Fetch blocklist with timeout support. Returns findings if successful, empty array if blocked/timed out/failed.
- * Returns status indicating what happened.
+ * Fetch blocklist with failure tolerance.
+ *
+ * `fetchBlocklist` rejects on any failure (network error, non-200, timeout).
+ * A failed refresh must never take down decisioning, so the rejection is
+ * converted to a degraded status here. When the feed has cached domains from a
+ * previous successful refresh, they are still served on the next call, so the
+ * catch path receives an empty list only when no cached data exists.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const blocklist = await fetchBlocklist();
-      clearTimeout(timeoutId);
-      const health = getBlocklistHealth();
-      if (health.lastError) {
-        return {
-          blocklist,
-          status: {
-            blocked: true,
-            timedOut: false,
-            error: health.lastError,
-          },
-        };
-      }
-      return { blocklist, status: { blocked: false, timedOut: false } };
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  } catch (err) {
-    const isTimeout = err instanceof Error && err.name === "AbortError";
-
-  // fetchBlocklist swallows errors internally, so check health for failures
-  const health = getBlocklistHealth();
-  if (health.configured && health.lastError) {
-    const isTimeout =
-      /abort|timeout/i.test(health.lastError);
+    const blocklist = await fetchBlocklist();
+    return { blocklist, status: { blocked: false, timedOut: false } };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown fetch error";
+    const isTimeout = /abort|timeout/i.test(message);
     return {
-      blocklist,
+      blocklist: [],
       status: {
         blocked: true,
         timedOut: isTimeout,
-        error: health.lastError,
+        error: message,
       },
     };
   }
-
-  return { blocklist, status: { blocked: false, timedOut: false } };
 }
 
 export async function evaluateSecurity(
@@ -229,7 +198,7 @@ export async function evaluateSecurity(
     await fetchBlocklistWithTimeout();
 
   if (blocklistFetchStatus.timedOut) {
-    analyzerStatus.blocklistStatus = "error";
+    analyzerStatus.blocklistStatus = "timeout";
     analyzerStatus.blocklistTimedOut = true;
     analyzerStatus.blocklistError =
       blocklistFetchStatus.error ?? "Blocklist fetch timed out";

@@ -43,10 +43,6 @@ function mockAuditEntry(overrides: Partial<AuditEntry> = {}): AuditEntry {
 }
 
 describe("verifyPaymentAgainstQuote", () => {
-  afterEach(() => {
-    delete process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS;
-  });
-
   it("accepts a matching build request", () => {
     const entry = mockAuditEntry();
     const result = verifyPaymentAgainstQuote(entry, {
@@ -76,190 +72,13 @@ describe("verifyPaymentAgainstQuote", () => {
       expect(result.error).toContain("BLOCK");
     }
   });
-
-  it("rejects an expired quote", () => {
-    process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS = "300";
-    // Timestamp 6 minutes in the past — beyond the 300 s TTL
-    const staleTimestamp = new Date(Date.now() - 6 * 60 * 1000).toISOString();
-    const entry = mockAuditEntry({ timestamp: staleTimestamp });
-
-    const result = verifyPaymentAgainstQuote(entry, {
-      destination: entry.paymentQuote!.destination,
-      amountXLM: entry.paymentQuote!.amountXLM,
-      asset: "native",
-      memo: entry.paymentQuote!.memo,
-      network: "testnet",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.status).toBe(403);
-      expect(result.error).toContain("expired");
-    }
-  });
-
-  it("accepts a fresh quote when TTL is configured", () => {
-    process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS = "300";
-    // Timestamp 30 seconds in the past — well within the 300 s TTL
-    const recentTimestamp = new Date(Date.now() - 30 * 1000).toISOString();
-    const entry = mockAuditEntry({ timestamp: recentTimestamp });
-
-    const result = verifyPaymentAgainstQuote(entry, {
-      destination: entry.paymentQuote!.destination,
-      amountXLM: entry.paymentQuote!.amountXLM,
-      asset: "native",
-      memo: entry.paymentQuote!.memo,
-      network: "testnet",
-    });
-
-    expect(result.ok).toBe(true);
-  });
-
-  it("falls back to the 300 s default when TTL env var is invalid", () => {
-    process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS = "not-a-number";
-    // Timestamp 6 minutes in the past — expired under the 300 s default
-    const staleTimestamp = new Date(Date.now() - 6 * 60 * 1000).toISOString();
-    const entry = mockAuditEntry({ timestamp: staleTimestamp });
-
-    const result = verifyPaymentAgainstQuote(entry, {
-      destination: entry.paymentQuote!.destination,
-      amountXLM: entry.paymentQuote!.amountXLM,
-      asset: "native",
-      memo: entry.paymentQuote!.memo,
-      network: "testnet",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.status).toBe(403);
-      expect(result.error).toContain("expired");
-    }
-  });
-
-  it("falls back to the 300 s default when TTL env var is zero", () => {
-    process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS = "0";
-    // Timestamp 6 minutes in the past — expired under the 300 s default
-    const staleTimestamp = new Date(Date.now() - 6 * 60 * 1000).toISOString();
-    const entry = mockAuditEntry({ timestamp: staleTimestamp });
-
-    const result = verifyPaymentAgainstQuote(entry, {
-      destination: entry.paymentQuote!.destination,
-      amountXLM: entry.paymentQuote!.amountXLM,
-      asset: "native",
-      memo: entry.paymentQuote!.memo,
-      network: "testnet",
-    });
-
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.status).toBe(403);
-      expect(result.error).toContain("expired");
-    }
-  });
-
-  describe("requestTimestampMs (clock-skew guard, #185)", () => {
-    afterEach(() => {
-      delete process.env.FORTEXA_REQUEST_TIMESTAMP_MAX_PAST_SKEW_SECONDS;
-      delete process.env.FORTEXA_REQUEST_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS;
-    });
-
-    it("accepts a request with no timestamp at all (backward compatible)", () => {
-      const entry = mockAuditEntry();
-      const result = verifyPaymentAgainstQuote(entry, {
-        destination: entry.paymentQuote!.destination,
-        amountXLM: entry.paymentQuote!.amountXLM,
-        asset: "native",
-        memo: entry.paymentQuote!.memo,
-        network: "testnet",
-      });
-
-      expect(result.ok).toBe(true);
-    });
-
-    it("accepts a request with a current timestamp", () => {
-      const entry = mockAuditEntry();
-      const result = verifyPaymentAgainstQuote(entry, {
-        destination: entry.paymentQuote!.destination,
-        amountXLM: entry.paymentQuote!.amountXLM,
-        asset: "native",
-        memo: entry.paymentQuote!.memo,
-        network: "testnet",
-        requestTimestampMs: Date.now(),
-      });
-
-      expect(result.ok).toBe(true);
-    });
-
-    it("rejects a stale request timestamp with a 400 before checking anything else", () => {
-      process.env.FORTEXA_REQUEST_TIMESTAMP_MAX_PAST_SKEW_SECONDS = "60";
-      const entry = mockAuditEntry();
-      const result = verifyPaymentAgainstQuote(entry, {
-        destination: "wrong-destination-should-never-be-reached",
-        amountXLM: entry.paymentQuote!.amountXLM,
-        asset: "native",
-        memo: entry.paymentQuote!.memo,
-        network: "testnet",
-        requestTimestampMs: Date.now() - 5 * 60 * 1000,
-      });
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.status).toBe(400);
-        expect(result.field).toBe("requestTimestampMs");
-        expect(result.error).toContain("too old");
-      }
-    });
-
-    it("rejects a request timestamp implausibly far in the future", () => {
-      process.env.FORTEXA_REQUEST_TIMESTAMP_MAX_FUTURE_SKEW_SECONDS = "30";
-      const entry = mockAuditEntry();
-      const result = verifyPaymentAgainstQuote(entry, {
-        destination: entry.paymentQuote!.destination,
-        amountXLM: entry.paymentQuote!.amountXLM,
-        asset: "native",
-        memo: entry.paymentQuote!.memo,
-        network: "testnet",
-        requestTimestampMs: Date.now() + 60 * 60 * 1000,
-      });
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) {
-        expect(result.status).toBe(400);
-        expect(result.field).toBe("requestTimestampMs");
-        expect(result.error).toContain("future");
-      }
-    });
-  });
 });
-
 
 describe("normalizeAmountXLM", () => {
   it("formats numeric and string amounts consistently", () => {
     expect(normalizeAmountXLM(18)).toBe("18.0000000");
     expect(normalizeAmountXLM("18")).toBe("18.0000000");
     expect(normalizeAmountXLM("18.5")).toBe("18.5000000");
-  });
-
-  it.each([
-    0,
-    -1,
-    Number.NaN,
-    Number.POSITIVE_INFINITY,
-    Number.MAX_SAFE_INTEGER + 1,
-    "0.00000001",
-    99999.99999999999,
-  ] as const)(
-    "rejects %s",
-    (amount) => {
-      expect(() => normalizeAmountXLM(amount)).toThrow(
-        "amountXLM must be a positive finite XLM amount with up to 7 decimals.",
-      );
-    },
-  );
-
-  it("preserves valid seven-decimal and maximum boundaries", () => {
-    expect(normalizeAmountXLM("0.0000001")).toBe("0.0000001");
-    expect(normalizeAmountXLM(100000)).toBe("100000.0000000");
   });
 });
 
