@@ -26,11 +26,7 @@ export class PolicyVersionConflict extends Error {
   public readonly currentUpdatedAt: string | null;
   public readonly expectedVersion: number;
 
-  constructor(input: {
-    currentVersion: number;
-    currentUpdatedAt: string | null;
-    expectedVersion: number;
-  }) {
+  constructor(input: {currentVersion: number; currentUpdatedAt: string | null; expectedVersion: number;}) {
     super(
       `Policy version conflict: expected v${input.expectedVersion} but current is v${input.currentVersion}.`,
     );
@@ -38,6 +34,23 @@ export class PolicyVersionConflict extends Error {
     this.currentVersion = input.currentVersion;
     this.currentUpdatedAt = input.currentUpdatedAt;
     this.expectedVersion = input.expectedVersion;
+  }
+}
+
+/**
+ * Raised when a policy document cannot be migrated onto the current schema.
+ * The previous policy remains active; the failing version is reported back
+ * to the caller so the API and the import UI can show the same message.
+ */
+export class PolicyMigrationError extends Error {
+  public readonly failingVersion: number | null;
+  public readonly issues: { path: string; message: string }[];
+
+  constructor(input: {error: string; failingVersion?: number | null; issues?: { path: string; message: string }[];}) {
+    super(input.error);
+    this.name = "PolicyMigrationError";
+    this.failingVersion = input.failingVersion ?? null;
+    this.issues = input.issues ?? [];
   }
 }
 
@@ -142,7 +155,26 @@ export function normalizePolicy(policy?: Partial<PolicyConfig>): PolicyConfig {
     maxToolCallsPerDay: policy?.maxToolCallsPerDay ?? defaultPolicyConfig.maxToolCallsPerDay,
     riskThreshold: policy?.riskThreshold ?? defaultPolicyConfig.riskThreshold,
     allowedHours: policy?.allowedHours ?? defaultPolicyConfig.allowedHours,
+    memoRequiredDestinations:
+      policy?.memoRequiredDestinations ?? defaultPolicyConfig.memoRequiredDestinations ?? [],
   };
+}
+
+/**
+ * Run the migration chain on a candidate document before any write.
+ * Throws `PolicyMigrationError` when the document cannot be migrated
+ * cleanly onto the current schema, leaving the previous policy active.
+ */
+export function migratePolicyDocument(raw: unknown): PolicyConfig {
+  const result = parseStoredPolicy(raw);
+  if (!result.ok) {
+    throw new PolicyMigrationError({
+      error: result.error,
+      failingVersion: result.version ?? null,
+      issues: result.issues,
+    });
+  }
+  return result.policy;
 }
 
 async function writeStore(nextPolicy: PolicyConfig, nextVersion: number) {
@@ -431,135 +463,23 @@ export async function getPolicyHistory(limit = 20) {
     }
   }
 
-  const historyStore = await readHistoryStore();
-  const entries = [...(historyStore.entries ?? [])].sort((left, right) => right.version - left.version);
-  return entries.slice(0, Math.max(1, limit));
+  const history = await readHistoryStore();
+  const entries = [...(history.entries ?? [])].sort((a, b) => b.version - a.version);
+  return entries.slice(0, Math.max(1, limit)).map((entry) => ({
+    version: entry.version,
+    updatedAt: entry.updatedAt,
+    updatedBy: entry.updatedBy,
+    policy: normalizePolicy(entry.policy),
+  }));
 }
 
-export async function getPolicyVersionByNumber(targetVersion: number) {
-  const initialized = await ensureDbPolicyState();
-  if (initialized.available) {
-    const db = await runWithDatabase("getPolicyVersionByNumber", async (pool) => {
-      const result = await pool.query<{
-        version: number;
-        updated_at: string;
-        updated_by: string | null;
-        policy: PolicyConfig;
-      }>(
-        `
-          SELECT version, updated_at, updated_by, policy
-          FROM fortexa_policy_history
-          WHERE version = $1
-          LIMIT 1
-        `,
-        [targetVersion]
-      );
+export async function rollbackPolicyVersion(version: number, updatedBy?: string) {
+  const history = await getPolicyHistory(100);
+  const target = history.find((entry) => entry.version === version);
 
-      const row = result.rows[0];
-      if (!row) {
-        return null;
-      }
-
-      return {
-        version: row.version,
-        updatedAt: new Date(row.updated_at).toISOString(),
-        updatedBy: row.updated_by ?? undefined,
-        policy: normalizePolicy(row.policy),
-      };
-    });
-
-    if (db.available) {
-      if (!db.value) {
-        throw new Error(`Policy version ${targetVersion} not found.`);
-      }
-      return db.value;
-    }
+  if (!target) {
+    throw new Error(`Policy version v${version} not found in history.`);
   }
 
-  const historyStore = await readHistoryStore();
-  const matched = (historyStore.entries ?? []).find((entry) => entry.version === targetVersion);
-
-  if (!matched) {
-    throw new Error(`Policy version ${targetVersion} not found.`);
-  }
-
-  return {
-    version: matched.version,
-    updatedAt: matched.updatedAt,
-    updatedBy: matched.updatedBy,
-    policy: normalizePolicy(matched.policy),
-  };
-}
-
-export async function rollbackPolicyVersion(targetVersion: number, updatedBy?: string) {
-  const initialized = await ensureDbPolicyState();
-  if (initialized.available) {
-    const db = await runWithDatabase("rollbackPolicyVersion", async (pool) => {
-      const result = await pool.query<{ policy: PolicyConfig }>(
-        `
-          SELECT policy
-          FROM fortexa_policy_history
-          WHERE version = $1
-          LIMIT 1
-        `,
-        [targetVersion]
-      );
-
-      const matched = result.rows[0];
-      if (!matched) {
-        throw new Error(`Policy version ${targetVersion} not found.`);
-      }
-
-      const normalized = normalizePolicy(matched.policy);
-      const now = new Date().toISOString();
-
-      const current = await pool.query<{ version: number }>(
-        `
-          SELECT version
-          FROM fortexa_policy_state
-          WHERE id = 1
-        `
-      );
-
-      const nextVersion = (current.rows[0]?.version ?? 1) + 1;
-
-      await pool.query(
-        `
-          INSERT INTO fortexa_policy_history (version, updated_at, updated_by, policy)
-          VALUES ($1, $2::timestamptz, $3, $4::jsonb)
-        `,
-        [nextVersion, now, updatedBy ?? `rollback:${targetVersion}`, JSON.stringify(normalized)]
-      );
-
-      await pool.query(
-        `
-          UPDATE fortexa_policy_state
-          SET version = $1,
-              updated_at = $2::timestamptz,
-              policy = $3::jsonb
-          WHERE id = 1
-        `,
-        [nextVersion, now, JSON.stringify(normalized)]
-      );
-
-      return {
-        policy: normalized,
-        updatedAt: now,
-        version: nextVersion,
-      };
-    });
-
-    if (db.available) {
-      return db.value;
-    }
-  }
-
-  const historyStore = await readHistoryStore();
-  const matched = (historyStore.entries ?? []).find((entry) => entry.version === targetVersion);
-
-  if (!matched) {
-    throw new Error(`Policy version ${targetVersion} not found.`);
-  }
-
-  return updatePolicyConfig(matched.policy, updatedBy ?? `rollback:${targetVersion}`);
+  return updatePolicyConfig(target.policy, updatedBy ?? "rollback");
 }

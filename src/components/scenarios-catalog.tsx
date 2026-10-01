@@ -2,15 +2,30 @@
 
 import { useState, useMemo } from "react";
 import { DecisionBadge } from "@/components/decision-badge";
+import type { ScenarioEvaluation } from "@/lib/scenarios/evaluate";
 import { demoScenarios } from "@/lib/scenarios/seed";
+import type { Scenario } from "@/lib/types/domain";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
-export function ScenariosCatalog() {
+export function ScenariosCatalog({
+  evaluations,
+}: {
+  evaluations: ScenarioEvaluation[];
+}) {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedDecision, setSelectedDecision] = useState<string>("ALL");
 
+  /** The decision the engine currently produces - not the hard-coded seed label. */
+  const engineDecision = (scenario: Scenario) =>
+    evaluations.find((evaluation) => evaluation.scenario.id === scenario.id)?.actual ??
+    scenario.expectedDecision;
+
   const filteredScenarios = useMemo(() => {
+    const evaluationByScenario = new Map(
+      evaluations.map((evaluation) => [evaluation.scenario.id, evaluation])
+    );
+
     return demoScenarios.filter((scenario) => {
       const query = searchQuery.trim().toLowerCase();
       const matchesSearch =
@@ -21,12 +36,14 @@ export function ScenariosCatalog() {
         scenario.action.domain.toLowerCase().includes(query) ||
         (scenario.action.tool?.toLowerCase().includes(query) ?? false);
 
+      const actualDecision =
+        evaluationByScenario.get(scenario.id)?.actual ?? scenario.expectedDecision;
       const matchesDecision =
-        selectedDecision === "ALL" || scenario.expectedDecision === selectedDecision;
+        selectedDecision === "ALL" || actualDecision === selectedDecision;
 
       return matchesSearch && matchesDecision;
     });
-  }, [searchQuery, selectedDecision]);
+  }, [evaluations, searchQuery, selectedDecision]);
 
   const clearFilters = () => {
     setSearchQuery("");
@@ -96,10 +113,14 @@ export function ScenariosCatalog() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {filteredScenarios.map((scenario) => (
-            <div key={scenario.id} className="surface-elevated p-5 transition hover:border-[hsl(var(--accent)/0.15)]">
+            <div
+              key={scenario.id}
+              data-scenario-id={scenario.id}
+              className="surface-elevated p-5 transition hover:border-[hsl(var(--accent)/0.15)]"
+            >
               <div className="mb-3 flex items-start justify-between gap-3">
                 <p className="font-medium">{scenario.title}</p>
-                <DecisionBadge decision={scenario.expectedDecision} />
+                <DecisionBadge decision={engineDecision(scenario)} />
               </div>
               <p className="mb-4 text-sm text-[hsl(var(--muted-foreground))]">{scenario.description}</p>
               <dl className="grid gap-2 text-xs text-[hsl(var(--muted-foreground))]">
@@ -114,6 +135,10 @@ export function ScenariosCatalog() {
                 <div className="flex justify-between">
                   <dt>Amount</dt>
                   <dd>{scenario.action.amountXLM} XLM</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt>Engine decision</dt>
+                  <dd data-engine-decision={scenario.id}>{engineDecision(scenario)}</dd>
                 </div>
               </dl>
             </div>

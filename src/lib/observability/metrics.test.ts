@@ -7,10 +7,15 @@ import {
   ALLOWED_OUTCOMES,
   ALLOWED_RESULTS,
   ALLOWED_ROUTES,
+  ALLOW_OUTCOMES,
+  DENY_OUTCOMES,
   MAX_CARDINALITY,
+  SUBMIT_FAILURE_RESULTS,
   escapePrometheusLabelValue,
   getDecisionOutcomeCounts,
   getMetricsSnapshot,
+  getOpsCounters,
+  getRateLimitRejectionCount,
   getStellarSubmitResultCounts,
   isAllowedLabelKey,
   isAllowedMetricName,
@@ -18,6 +23,7 @@ import {
   normalizeRoute,
   recordApiMetric,
   recordDecisionOutcome,
+  recordRateLimitRejection,
   recordStellarSubmitResult,
   renderHelpLine,
   renderMetricLine,
@@ -109,10 +115,172 @@ describe("observability metrics", () => {
   it("resets new counters alongside existing buckets", () => {
     recordDecisionOutcome("WARN");
     recordStellarSubmitResult("success");
+    recordRateLimitRejection();
     resetMetrics();
 
     expect(getDecisionOutcomeCounts().size).toBe(0);
     expect(getStellarSubmitResultCounts().size).toBe(0);
+    expect(getRateLimitRejectionCount()).toBe(0);
+  });
+
+  describe("ops counters (dashboard <-> metrics parity)", () => {
+    it("zeroes every counter for an empty snapshot", () => {
+      expect(getMetricsSnapshot().counters).toEqual({
+        allow: 0,
+        deny: 0,
+        rateLimit: 0,
+        submitFailures: 0,
+      });
+    });
+
+    it("rolls allow/deny decisions up by outcome", () => {
+      recordDecisionOutcome("APPROVE");
+      recordDecisionOutcome("WARN");
+      recordDecisionOutcome("REQUIRE_APPROVAL");
+      recordDecisionOutcome("BLOCK");
+
+      expect(getOpsCounters().allow).toBe(2);
+      expect(getOpsCounters().deny).toBe(2);
+    });
+
+    it("counts rate-limit rejections", () => {
+      recordRateLimitRejection();
+      recordRateLimitRejection();
+      recordRateLimitRejection();
+
+      expect(getRateLimitRejectionCount()).toBe(3);
+      expect(getMetricsSnapshot().counters.rateLimit).toBe(3);
+    });
+
+    it("counts submit failures but treats replays and successes as non-failures", () => {
+      recordStellarSubmitResult("success");
+      recordStellarSubmitResult("idempotency_replay");
+      for (const result of SUBMIT_FAILURE_RESULTS) {
+        recordStellarSubmitResult(result);
+      }
+
+      expect(getMetricsSnapshot().counters.submitFailures).toBe(SUBMIT_FAILURE_RESULTS.length);
+      expect(SUBMIT_FAILURE_RESULTS).not.toContain("success");
+      expect(SUBMIT_FAILURE_RESULTS).not.toContain("idempotency_replay");
+    });
+
+    it("never derives counters from request buckets", () => {
+      recordApiMetric({ route: "/api/decision", method: "POST", statusCode: 429, durationMs: 5 });
+
+      const snapshot = getMetricsSnapshot();
+      expect(snapshot.totals.errorCount).toBe(1);
+      expect(snapshot.counters).toEqual({
+        allow: 0,
+        deny: 0,
+        rateLimit: 0,
+        submitFailures: 0,
+      });
+    });
+
+    it("exposes the same numbers through the JSON snapshot and the prometheus body", () => {
+      recordDecisionOutcome("APPROVE");
+      recordDecisionOutcome("BLOCK");
+      recordRateLimitRejection();
+      recordStellarSubmitResult("idempotency_conflict");
+
+      const { counters } = getMetricsSnapshot();
+      const output = toPrometheusText();
+
+      expect(output).toContain(`fortexa_decisions_allowed_total ${counters.allow}`);
+      expect(output).toContain(`fortexa_decisions_denied_total ${counters.deny}`);
+      expect(output).toContain(`fortexa_rate_limit_rejections_total ${counters.rateLimit}`);
+      expect(output).toContain(`fortexa_stellar_submit_failures_total ${counters.submitFailures}`);
+      expect(output).toContain("# TYPE fortexa_decisions_allowed_total counter");
+      expect(output).toContain("# TYPE fortexa_decisions_denied_total counter");
+      expect(output).toContain("# TYPE fortexa_rate_limit_rejections_total counter");
+      expect(output).toContain("# TYPE fortexa_stellar_submit_failures_total counter");
+    });
+
+    it("emits zero-initialised counters so alerts never break on a fresh process", () => {
+      const output = toPrometheusText();
+
+      expect(output).toContain("fortexa_decisions_allowed_total 0");
+      expect(output).toContain("fortexa_decisions_denied_total 0");
+      expect(output).toContain("fortexa_rate_limit_rejections_total 0");
+      expect(output).toContain("fortexa_stellar_submit_failures_total 0");
+    });
+
+    it("keeps allow/deny groups aligned with the exported outcome allowlist", () => {
+      expect(ALLOW_OUTCOMES.every((outcome) => ALLOWED_OUTCOMES.has(outcome))).toBe(true);
+      expect(DENY_OUTCOMES.every((outcome) => ALLOWED_OUTCOMES.has(outcome))).toBe(true);
+      expect(new Set([...ALLOW_OUTCOMES, ...DENY_OUTCOMES]).size).toBe(ALLOWED_OUTCOMES.size);
+      expect(SUBMIT_FAILURE_RESULTS.every((result) => ALLOWED_RESULTS.has(result))).toBe(true);
+    });
+  });
+
+  describe("#205 redaction-aware metrics", () => {
+    it("does not place Stellar addresses or memos in route labels", () => {
+      const destination = "GA7QYNF7SOWQ3GLR2ZGMGIRKJ7F6NCWKUX6PS7LJVCUJUJQG2U5F6Z7P";
+      recordApiMetric({
+        route: `/api/decision?destination=${destination}&memo=invoice-8817`,
+        method: "POST",
+        statusCode: 500,
+        durationMs: 10,
+      });
+      recordApiMetric({
+        route: `memo ${destination} failed`,
+        method: "POST",
+        statusCode: 500,
+        durationMs: 10,
+      });
+
+      const output = toPrometheusText();
+      expect(output).not.toContain(destination);
+      expect(output).not.toContain("invoice-8817");
+
+      const snapshot = getMetricsSnapshot();
+      for (const r of snapshot.routes) {
+        expect(r.route).not.toContain(destination);
+        expect(r.route).not.toContain("invoice-8817");
+        expect(ALLOWED_ROUTES.has(r.route)).toBe(true);
+      }
+    });
+
+    it("keeps incrementing submit failure counters when errors are fully redacted", () => {
+      const signedXdr = "A".repeat(120);
+
+      // Horizon failure whose message is entirely a signed XDR blob: logging
+      // redacts it, but the stable counter must still move.
+      recordStellarSubmitResult("horizon_failure");
+      recordStellarSubmitResult("horizon_failure");
+      recordStellarSubmitResult("validation_failure");
+
+      const counts = getStellarSubmitResultCounts();
+      expect(counts.get("horizon_failure")).toBe(2);
+      expect(counts.get("validation_failure")).toBe(1);
+      expect(signedXdr.length).toBe(120); // fixture sanity
+
+      const output = toPrometheusText();
+      expect(output).toContain('result="horizon_failure"');
+      expect(output).not.toContain(signedXdr);
+    });
+
+    it("keeps decision outcome counters incrementing when errors are redacted", () => {
+      recordDecisionOutcome("BLOCK");
+      recordDecisionOutcome("BLOCK");
+      recordDecisionOutcome("REQUIRE_APPROVAL");
+
+      const counts = getDecisionOutcomeCounts();
+      expect(counts.get("BLOCK")).toBe(2);
+      expect(counts.get("REQUIRE_APPROVAL")).toBe(1);
+    });
+
+    it("never emits metric label values longer than route allowlist entries", () => {
+      const longBlob = "x".repeat(300);
+      recordApiMetric({ route: longBlob, method: "POST", statusCode: 200, durationMs: 5 });
+      recordApiMetric({ route: `/api/decision?xdr=${longBlob}`, method: "POST", statusCode: 200, durationMs: 5 });
+
+      const snapshot = getMetricsSnapshot();
+      for (const r of snapshot.routes) {
+        expect(r.route.length).toBeLessThanOrEqual(128);
+        expect(r.route).not.toContain(longBlob);
+      }
+    });
   });
 
   describe("allowlist and normalization (SCF high)", () => {
@@ -182,15 +350,15 @@ describe("observability metrics", () => {
     });
 
     it("drops disallowed decision outcomes and stellar results", () => {
-      // @ts-expect-error testing runtime guard
+      // @ts-expect-error: testing runtime guard for invalid outcome
       recordDecisionOutcome("G" + "A".repeat(55));
-      // @ts-expect-error freetext injection
+      // @ts-expect-error: testing freetext injection guard
       recordDecisionOutcome("APPROVE; wallet=G123");
-      // @ts-expect-error free-text outcome is intentionally invalid
+      // @ts-expect-error invalid outcome
       recordDecisionOutcome("free-text");
-      // @ts-expect-error unlisted submit result is intentionally invalid
+      // @ts-expect-error invalid result
       recordStellarSubmitResult("wallet_leak_payload");
-      // @ts-expect-error wallet-like submit result is intentionally invalid
+      // @ts-expect-error invalid result format
       recordStellarSubmitResult("G12345");
 
       expect(getDecisionOutcomeCounts().size).toBe(0);
@@ -210,9 +378,9 @@ describe("observability metrics", () => {
       recordApiMetric({ route: wallet, method: "POST", statusCode: 200, durationMs: 10 });
       recordApiMetric({ route: `/api/decision?wallet=${wallet}`, method: "POST", statusCode: 200, durationMs: 10 });
       // Also try to inject via outcome/result with wallet-like string (should be dropped)
-      // @ts-expect-error wallet address is intentionally not an outcome
+      // @ts-expect-error wallet injection attempt
       recordDecisionOutcome(wallet);
-      // @ts-expect-error wallet address is intentionally not a submit result
+      // @ts-expect-error wallet injection attempt
       recordStellarSubmitResult(wallet);
 
       const output = toPrometheusText();

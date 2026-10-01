@@ -1,115 +1,133 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { WalletStatusCard } from './wallet-status-card';
-import { useWallet } from '@solana/wallet-adapter-react';
-import { useSessionWallet } from '@/lib/auth/session-wallet';
-import { useWalletRole } from '@/lib/auth/wallet-role';
-import { PublicKey } from '@solana/web3.js';
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it, vi } from "vitest";
 
-jest.mock('@solana/wallet-adapter-react');
-jest.mock('@/lib/auth/session-wallet');
-jest.mock('@/lib/auth/wallet-role');
+// The card module imports the Freighter-backed session hook and Next router;
+// the panel under test uses neither, and no browser extension is loaded.
+vi.mock("@stellar/freighter-api", () => {
+  throw new Error("browser extension must not be used in tests");
+});
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
-const mockUseWallet = useWallet as jest.MockedFunction<typeof useWallet>;
-const mockUseSessionWallet = useSessionWallet as jest.MockedFunction<typeof useSessionWallet>;
-const mockUseWalletRole = useWalletRole as jest.MockedFunction<typeof useWalletRole>;
+import { WalletActionsPanel } from "@/components/wallet-status-card";
+import { resolveWalletCardState } from "@/lib/auth/session-wallet";
 
-const mockPublicKey = new PublicKey('11111111111111111111111111111111');
-const mockSessionKey = new PublicKey('22222222222222222222222222222222');
+const SESSION_WALLET = "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H";
+const OTHER_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7";
 
-const mockOnPay = jest.fn();
-const mockOnPolicy = jest.fn();
-const mockOnRevoke = jest.fn();
-const mockClearSession = jest.fn();
+function buttonDisabled(html: string, action: string) {
+  const match = html.match(new RegExp(`<button[^>]*data-action="${action}"[^>]*>`));
+  expect(match, `${action} button rendered`).not.toBeNull();
+  return /\sdisabled=""/.test(match![0]);
+}
 
-describe('WalletStatusCard', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
+describe("resolveWalletCardState", () => {
+  it("enables pay and policy for an operator whose connected account matches", () => {
+    const state = resolveWalletCardState({
+      authenticated: true,
+      role: "operator",
+      sessionWallet: SESSION_WALLET,
+      connectedAccount: SESSION_WALLET.toLowerCase(),
+    });
+    expect(state).toMatchObject({ status: "match", canPay: true, canEditPolicy: true });
   });
 
-  it('shows signed out when not connected', () => {
-    mockUseWallet.mockReturnValue({ connected: false, publicKey: null });
-    mockUseSessionWallet.mockReturnValue({ sessionWallet: null, clearSession: mockClearSession });
-    mockUseWalletRole.mockReturnValue({ hasPayRole: false, hasPolicyRole: false });
-
-    render(
-      <WalletStatusCard
-        onPay={mockOnPay}
-        onPolicy={mockOnPolicy}
-        onRevoke={mockOnRevoke}
-      />
-    );
-
-    expect(screen.getByText('Wallet not connected')).toBeInTheDocument();
+  it("enables only what the role allows for a matching viewer", () => {
+    const state = resolveWalletCardState({
+      authenticated: true,
+      role: "viewer",
+      sessionWallet: SESSION_WALLET,
+      connectedAccount: SESSION_WALLET,
+    });
+    expect(state).toMatchObject({ status: "match", canPay: false, canEditPolicy: false });
   });
 
-  it('enables actions when wallet matches session', () => {
-    mockUseWallet.mockReturnValue({ connected: true, publicKey: mockPublicKey });
-    mockUseSessionWallet.mockReturnValue({ sessionWallet: mockPublicKey, clearSession: mockClearSession });
-    mockUseWalletRole.mockReturnValue({ hasPayRole: true, hasPolicyRole: true });
-
-    render(
-      <WalletStatusCard
-        onPay={mockOnPay}
-        onPolicy={mockOnPolicy}
-        onRevoke={mockOnRevoke}
-      />
-    );
-
-    expect(screen.getByText('Pay')).not.toBeDisabled();
-    expect(screen.getByText('Policy')).not.toBeDisabled();
-    expect(screen.queryByText('Session wallet mismatch')).not.toBeInTheDocument();
+  it("disables pay and policy when the connected account differs", () => {
+    const state = resolveWalletCardState({
+      authenticated: true,
+      role: "operator",
+      sessionWallet: SESSION_WALLET,
+      connectedAccount: OTHER_ACCOUNT,
+    });
+    expect(state).toMatchObject({ status: "mismatch", canPay: false, canEditPolicy: false });
   });
 
-  it('disables actions when wallet does not match session', () => {
-    mockUseWallet.mockReturnValue({ connected: true, publicKey: mockPublicKey });
-    mockUseSessionWallet.mockReturnValue({ sessionWallet: mockSessionKey, clearSession: mockClearSession });
-    mockUseWalletRole.mockReturnValue({ hasPayRole: true, hasPolicyRole: true });
-
-    render(
-      <WalletStatusCard
-        onPay={mockOnPay}
-        onPolicy={mockOnPolicy}
-        onRevoke={mockOnRevoke}
-      />
-    );
-
-    expect(screen.getByText('Pay')).toBeDisabled();
-    expect(screen.getByText('Policy')).toBeDisabled();
-    expect(screen.getByText('Session wallet mismatch')).toBeInTheDocument();
+  it("disables actions when no account is connected or no wallet is bound", () => {
+    expect(
+      resolveWalletCardState({ authenticated: true, role: "operator", sessionWallet: SESSION_WALLET, connectedAccount: null }),
+    ).toMatchObject({ status: "not_connected", canPay: false, canEditPolicy: false });
+    expect(
+      resolveWalletCardState({ authenticated: true, role: "operator", sessionWallet: null, connectedAccount: SESSION_WALLET }),
+    ).toMatchObject({ status: "unbound", canPay: false, canEditPolicy: false });
   });
 
-  it('clears session on revoke', () => {
-    mockUseWallet.mockReturnValue({ connected: true, publicKey: mockPublicKey });
-    mockUseSessionWallet.mockReturnValue({ sessionWallet: mockPublicKey, clearSession: mockClearSession });
-    mockUseWalletRole.mockReturnValue({ hasPayRole: true, hasPolicyRole: true });
+  it("returns signed out with nothing enabled after revoke", () => {
+    const state = resolveWalletCardState({
+      authenticated: true,
+      revoked: true,
+      role: "operator",
+      sessionWallet: SESSION_WALLET,
+      connectedAccount: SESSION_WALLET,
+    });
+    expect(state).toEqual({
+      status: "signed_out",
+      sessionWallet: null,
+      connectedAccount: null,
+      canPay: false,
+      canEditPolicy: false,
+    });
+  });
+});
 
-    render(
-      <WalletStatusCard
-        onPay={mockOnPay}
-        onPolicy={mockOnPolicy}
-        onRevoke={mockOnRevoke}
-      />
+describe("WalletActionsPanel", () => {
+  it("renders enabled pay and policy actions for a matching operator", () => {
+    const html = renderToStaticMarkup(
+      <WalletActionsPanel
+        state={resolveWalletCardState({
+          authenticated: true,
+          role: "operator",
+          sessionWallet: SESSION_WALLET,
+          connectedAccount: SESSION_WALLET,
+        })}
+      />,
     );
-
-    fireEvent.click(screen.getByText('Revoke'));
-    expect(mockOnRevoke).toHaveBeenCalled();
-    expect(mockClearSession).toHaveBeenCalled();
+    expect(html).toContain('data-status="match"');
+    expect(buttonDisabled(html, "pay")).toBe(false);
+    expect(buttonDisabled(html, "policy")).toBe(false);
   });
 
-  it('disables actions when roles are missing even with matching wallet', () => {
-    mockUseWallet.mockReturnValue({ connected: true, publicKey: mockPublicKey });
-    mockUseSessionWallet.mockReturnValue({ sessionWallet: mockPublicKey, clearSession: mockClearSession });
-    mockUseWalletRole.mockReturnValue({ hasPayRole: false, hasPolicyRole: false });
-
-    render(
-      <WalletStatusCard
-        onPay={mockOnPay}
-        onPolicy={mockOnPolicy}
-        onRevoke={mockOnRevoke}
-      />
+  it("renders a mismatch state with pay and policy disabled", () => {
+    const html = renderToStaticMarkup(
+      <WalletActionsPanel
+        state={resolveWalletCardState({
+          authenticated: true,
+          role: "operator",
+          sessionWallet: SESSION_WALLET,
+          connectedAccount: OTHER_ACCOUNT,
+        })}
+      />,
     );
+    expect(html).toContain('data-status="mismatch"');
+    expect(html).toContain('role="alert"');
+    expect(buttonDisabled(html, "pay")).toBe(true);
+    expect(buttonDisabled(html, "policy")).toBe(true);
+  });
 
-    expect(screen.getByText('Pay')).toBeDisabled();
-    expect(screen.getByText('Policy')).toBeDisabled();
+  it("shows signed out after revoke with no action enabled", () => {
+    const html = renderToStaticMarkup(
+      <WalletActionsPanel
+        state={resolveWalletCardState({
+          authenticated: true,
+          revoked: true,
+          role: "operator",
+          sessionWallet: SESSION_WALLET,
+          connectedAccount: SESSION_WALLET,
+        })}
+      />,
+    );
+    expect(html).toContain('data-status="signed_out"');
+    expect(html).toContain("Signed out");
+    expect(buttonDisabled(html, "pay")).toBe(true);
+    expect(buttonDisabled(html, "policy")).toBe(true);
+    expect(html).not.toContain('data-action="revoke"');
   });
 });

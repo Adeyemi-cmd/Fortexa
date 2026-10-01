@@ -2,7 +2,7 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { NextRequest } from "next/server";
 
-export type AuthRole = "operator" | "viewer";
+export type AuthRole = "operator" | "signer" | "viewer";
 
 export type AuthSession = {
   userId: string;
@@ -14,6 +14,7 @@ export type AuthSession = {
    */
   sid: string;
   exp: number;
+  publicKey?: string;
 };
 
 export const AUTH_COOKIE_KEY = "fortexa_session";
@@ -43,20 +44,14 @@ function sign(payloadPart: string) {
   return createHmac("sha256", getAuthSecret()).update(payloadPart).digest("base64url");
 }
 
-export function createSessionToken(input: {
-  email: string;
-  role: AuthRole;
-  userId?: string;
-  sessionId?: string;
-  expiresInSeconds?: number;
-}) {
+export function createSessionToken(input: { email: string; role: AuthRole; userId?: string; expiresInSeconds?: number; publicKey?: string }) {
   const now = Math.floor(Date.now() / 1000);
   const payload: AuthSession = {
     userId: input.userId ?? randomUUID(),
     email: input.email,
     role: input.role,
-    sid: input.sessionId ?? randomUUID(),
-    exp: now + (input.expiresInSeconds ?? SESSION_MAX_AGE_SECONDS),
+    exp: now + (input.expiresInSeconds ?? 60 * 60 * 24 * 7),
+    publicKey: input.publicKey,
   };
 
   const payloadPart = encodeBase64Url(JSON.stringify(payload));
@@ -65,7 +60,7 @@ export function createSessionToken(input: {
   return `${payloadPart}.${signaturePart}`;
 }
 
-export function verifySessionToken(token: string): AuthSession | null {
+export function verifySessionToken(token: string, options?: VerifySessionTokenOptions): AuthSession | null {
   const parts = token.split(".");
   if (parts.length !== 2) {
     return null;
@@ -86,7 +81,7 @@ export function verifySessionToken(token: string): AuthSession | null {
   }
 
   try {
-    const parsed = JSON.parse(decodeBase64Url(payloadPart)) as AuthSession;
+    const parsed = JSON.parse(decodeBase64Url(payloadPart)) as Partial<AuthSession>;
 
     // A token without a session id cannot be revoked, so it is not accepted.
     if (
@@ -104,11 +99,40 @@ export function verifySessionToken(token: string): AuthSession | null {
       return null;
     }
 
-    if (parsed.role !== "operator" && parsed.role !== "viewer") {
+    if (parsed.role !== "operator" && parsed.role !== "signer" && parsed.role !== "viewer") {
       return null;
     }
 
-    return parsed;
+    if (parsed.roles !== undefined && (!Array.isArray(parsed.roles) || parsed.roles.some((role) => role !== "operator" && role !== "signer" && role !== "viewer"))) {
+      return null;
+    }
+
+    if (parsed.roles !== undefined && (!Array.isArray(parsed.roles) || parsed.roles.some((role) => role !== "operator" && role !== "signer" && role !== "viewer"))) {
+      return null;
+    }
+
+    const session: AuthSession = {
+      userId: parsed.userId,
+      email: parsed.email,
+      role: parsed.role,
+      exp: parsed.exp,
+      gen: normalizeGeneration(parsed.gen),
+      sid: normalizeSessionId(parsed.sid),
+    };
+
+    if (!options?.allowStaleGeneration) {
+      const generationCurrent = isSessionGenerationCurrent({
+        userId: session.userId,
+        sessionId: session.sid,
+        generation: session.gen,
+      });
+
+      if (!generationCurrent) {
+        return null;
+      }
+    }
+
+    return session;
   } catch {
     return null;
   }
@@ -121,4 +145,56 @@ export function getSessionFromRequest(request: NextRequest) {
   }
 
   return verifySessionToken(token);
+}
+
+export function startSession(input: {
+  email: string;
+  role: AuthRole;
+  userId?: string;
+  expiresInSeconds?: number;
+}) {
+  const userId = input.userId ?? randomUUID();
+  const ttlSeconds = input.expiresInSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
+  const sessionId = randomUUID();
+
+  const token = createSessionToken({
+    email: input.email,
+    role: input.role,
+    userId,
+    expiresInSeconds: ttlSeconds,
+    generation: 0,
+    sessionId,
+  });
+
+  registerSession({
+    userId,
+    sessionId,
+    generation: 0,
+    expiresAtMs: Date.now() + ttlSeconds * 1000,
+  });
+
+  return { token, userId, sessionId, generation: 0 };
+}
+
+export function rotateSessionToken(session: AuthSession) {
+  const rotated = rotateSessionGeneration({
+    userId: session.userId,
+    sessionId: session.sid,
+    currentGeneration: session.gen,
+    expiresAtMs: Date.now() + DEFAULT_SESSION_TTL_SECONDS * 1000,
+  });
+
+  if (!rotated.ok) {
+    return null;
+  }
+
+  const token = createSessionToken({
+    email: session.email,
+    role: session.role,
+    userId: session.userId,
+    generation: rotated.generation,
+    sessionId: session.sid,
+  });
+
+  return { token, generation: rotated.generation };
 }

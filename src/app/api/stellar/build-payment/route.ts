@@ -3,7 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/production";
+import { readinessBlockResponse } from "@/lib/readiness/guard";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
+import { securityHeadersForRequest } from "@/lib/security/headers";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { paymentExceedsPerTxCap } from "@/lib/policy/engine";
@@ -17,21 +19,34 @@ import {
 } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
-  const rate = await consumeRateLimit(request, {
-    key: "stellar-build-payment",
+  // Read the body first so the gate can blocklist-check the destination in
+  // the same atomic step as the rate-limit consumption (issue #202).
+  const bodyResult = await readJsonBody(request);
+
+  let gateDestination: string | undefined;
+  if (bodyResult.ok) {
+    const preview = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
+    gateDestination = preview.success ? preview.data.destination : undefined;
+  }
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "stellar-build-payment",
     limit: 30,
     windowMs: 60_000,
+    destination: gateDestination,
   });
 
-  if (!rate.ok) {
+  if (!gate.ok) {
     return NextResponse.json(
       { error: "Rate limit exceeded for payment build endpoint." },
-      { status: 429, headers: rateLimitHeaders(rate) },
+      { status: 429, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   }
 
+  const rate = gate.rate;
+
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       return auth.response;
@@ -49,7 +64,15 @@ export async function POST(request: NextRequest) {
         { status: 503, headers: rateLimitHeaders(rate) },
       );
     }
-
+    const notReady = await readinessBlockResponse(
+      request,
+      "/api/stellar/build-payment",
+      Date.now(),
+      rateLimitHeaders(rate),
+    );
+    if (notReady) {
+      return notReady;
+    }
     const userId = auth.session.userId;
     const assignedWallet = await getUserWallet(userId);
 
@@ -60,11 +83,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) {
       return NextResponse.json(
         { error: bodyResult.error },
-        { status: 413, headers: rateLimitHeaders(rate) },
+        { status: 413, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -82,9 +104,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
-          details: toPublicValidationDetails(parsedPayload.error),
+          details: parsedPayload.error.flatten(),
         },
-        { status: 400, headers: rateLimitHeaders(rate) },
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -98,7 +120,7 @@ export async function POST(request: NextRequest) {
           error:
             "A linked Stellar wallet is required before building transactions.",
         },
-        { status: 400, headers: rateLimitHeaders(rate) },
+        { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -109,7 +131,6 @@ export async function POST(request: NextRequest) {
       asset: payload.asset,
       memo: payload.memo,
       network: payload.network,
-      requestTimestampMs: payload.requestTimestampMs,
     });
 
     if (!verification.ok) {
@@ -118,7 +139,7 @@ export async function POST(request: NextRequest) {
           error: verification.error,
           field: verification.field,
         },
-        { status: verification.status, headers: rateLimitHeaders(rate) },
+        { status: verification.status, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
     }
 
@@ -142,6 +163,14 @@ export async function POST(request: NextRequest) {
       sourcePublicKey,
     );
 
+    const quoteExpiresAt = getQuoteExpiresAt(auditEntry!);
+    const buildAuthorization = createBuildAuthorization({
+      userId,
+      decisionId: auditEntry!.id,
+      quoteExpiresAt,
+      transactionHash: getTransactionHash(unsigned.xdr, unsigned.networkPassphrase),
+    });
+
     return NextResponse.json(
       {
         ok: true,
@@ -154,7 +183,7 @@ export async function POST(request: NextRequest) {
         decisionReceipt: verification.quote,
         paymentQuote: verification.quote,
       },
-      { headers: rateLimitHeaders(rate) },
+      { headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   } catch (error) {
     return NextResponse.json(
@@ -164,7 +193,7 @@ export async function POST(request: NextRequest) {
             ? error.message
             : "Failed to build payment transaction.",
       },
-      { status: 500, headers: rateLimitHeaders(rate) },
+      { status: 500, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   }
 }

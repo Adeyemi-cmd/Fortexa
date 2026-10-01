@@ -13,6 +13,10 @@ export async function GET(request: NextRequest) {
 
   logInfo("Health check requested", context);
 
+  // Run readiness BEFORE any call to runWithDatabase(), which applies pending
+  // migrations and would hide a stale schema.
+  const readiness = await getReadiness();
+
   const env = {
     hasGroqKey: Boolean(process.env.GROQ_API_KEY),
     hasAuthSecret: Boolean(process.env.FORTEXA_AUTH_SECRET),

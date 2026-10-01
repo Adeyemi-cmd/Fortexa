@@ -31,7 +31,7 @@ function inFlightAllow(id: string, amountXLM: number, overrides: Partial<AuditEn
     paymentQuote: {
       destination: DESTINATION,
       amountXLM: String(amountXLM),
-      asset: "XLM",
+      asset: "native",
       memo: `fortexa:${id}`,
       network: "testnet",
     } as AuditEntry["paymentQuote"],

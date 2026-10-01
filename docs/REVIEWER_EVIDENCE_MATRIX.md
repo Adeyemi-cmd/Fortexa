@@ -11,6 +11,7 @@ This document maps Fortexa's core security and payment claims directly to the co
 - [ ] **Signed-XDR only payment path**: Verify API only accepts signed XDR in `src/app/api/stellar/submit-signed/route.ts` and client builds unsigned in `src/lib/stellar/client.ts`.
 - [ ] **Audit hash-chain integrity**: Verify hashing mechanism in `src/lib/audit/hash-chain.ts`.
 - [ ] **Metrics and ops visibility**: Verify structured logging and metrics in `src/lib/observability/metrics.ts` and `src/lib/observability/logger.ts`.
+- [ ] **Dashboard and scrape agree**: Verify the Ops tab loader (`src/app/settings/page.tsx`) passes `getMetricsSnapshot()` to `src/components/ops-dashboard.tsx`, the same object `GET /api/metrics` serialises.
 - [ ] **Idempotent submit behavior**: Verify deduplication logic via `xdrHash` in `src/app/api/stellar/submit-signed/route.ts`.
 - [ ] **No server-side private-key custody**: Verify absence of backend signing (`Keypair.fromSecret()`) in `src/lib/stellar/client.ts`.
 
@@ -24,7 +25,7 @@ This document maps Fortexa's core security and payment claims directly to the co
 | **Human approval gate** | [`src/components/decision-console.tsx`](../src/components/decision-console.tsx)<br>[`src/lib/decision/simulate.ts`](../src/lib/decision/simulate.ts) | `src/lib/decision/simulate.test.ts` |
 | **Signed-XDR only payment path** | [`src/app/api/stellar/submit-signed/route.ts`](../src/app/api/stellar/submit-signed/route.ts)<br>[`src/lib/stellar/client.ts`](../src/lib/stellar/client.ts) | `src/lib/stellar/verify-payment-quote.test.ts` |
 | **Audit hash-chain integrity** | [`src/lib/audit/hash-chain.ts`](../src/lib/audit/hash-chain.ts) | `src/lib/audit/hash-chain.test.ts` |
-| **Metrics and ops visibility** | [`src/lib/observability/metrics.ts`](../src/lib/observability/metrics.ts)<br>[`src/lib/observability/logger.ts`](../src/lib/observability/logger.ts) | `src/lib/observability/metrics.test.ts` |
+| **Metrics and ops visibility** | [`src/lib/observability/metrics.ts`](../src/lib/observability/metrics.ts)<br>[`src/lib/observability/logger.ts`](../src/lib/observability/logger.ts)<br>[`src/app/api/metrics/route.ts`](../src/app/api/metrics/route.ts)<br>[`src/components/ops-dashboard.tsx`](../src/components/ops-dashboard.tsx) | `src/lib/observability/metrics.test.ts`<br>`src/app/api/metrics/route.test.ts`<br>`src/components/ops-dashboard.snapshot.test.tsx` |
 | **Idempotent submit behavior** | [`src/app/api/stellar/submit-signed/route.ts`](../src/app/api/stellar/submit-signed/route.ts) | |
 | **No server-side private-key custody** | [`src/lib/stellar/client.ts`](../src/lib/stellar/client.ts) | |
 

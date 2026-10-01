@@ -29,6 +29,13 @@ export interface PolicyConfig {
     start: number;
     end: number;
   };
+  /**
+   * Stellar destinations (G... addresses, compared case-insensitively after
+   * trim + uppercase) that require a non-empty memo. A payment to one of
+   * these destinations without a memo is blocked with MEMO_REQUIRED_MISSING.
+   * Evaluated by the shared decision engine so simulate and live decide agree.
+   */
+  memoRequiredDestinations?: string[];
 }
 
 export interface DailyUsage {

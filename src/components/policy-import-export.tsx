@@ -91,6 +91,11 @@ export function PolicyImportExport({
           return;
         }
 
+        if (hasSensitiveField(parsed)) {
+          setImportState({ status: "error", error: "Policy contains a sensitive field and cannot be saved." });
+          return;
+        }
+
         const result = parsePolicyImport(parsed);
         if (!result.ok) {
           setImportState({ status: "error", error: result.error });
