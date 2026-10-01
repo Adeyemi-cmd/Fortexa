@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Networks } from "@stellar/stellar-sdk";
 
 export const DEFAULT_STELLAR_HORIZON_URL = "https://horizon-testnet.stellar.org";
@@ -10,6 +11,14 @@ export function getStellarHorizonUrl(): string {
 
 export function getStellarNetworkPassphrase(): string {
   return process.env.STELLAR_NETWORK_PASSPHRASE ?? Networks.TESTNET;
+}
+
+export function getStellarNetworkFingerprint(): string {
+  return createHash("sha256")
+    .update(getStellarHorizonUrl())
+    .update("\0")
+    .update(getStellarNetworkPassphrase())
+    .digest("hex");
 }
 
 export function inferStellarNetworkProfile(horizonUrl: string): StellarNetworkProfile {

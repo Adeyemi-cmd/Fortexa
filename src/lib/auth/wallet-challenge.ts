@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Keypair } from "@stellar/stellar-sdk";
 
+import {
+  checkLoginLockout,
+  recordLoginFailure,
+} from "@/lib/auth/login-lockout";
 import { normalizeWalletPublicKey } from "@/lib/auth/wallet-role";
 import {
   clearSharedChallenges,
@@ -24,41 +28,6 @@ type StoredChallenge = WalletChallengeRecord & {
 };
 
 const challenges = new Map<string, StoredChallenge>();
-const challengeVerificationLocks = new Map<string, Promise<void>>();
-
-async function withChallengeVerificationLock<T>(challengeId: string, operation: () => Promise<T>): Promise<T> {
-  const previous = challengeVerificationLocks.get(challengeId) ?? Promise.resolve();
-  let release: (() => void) | undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  challengeVerificationLocks.set(challengeId, previous.then(() => current));
-  await previous;
-
-  try {
-    return await operation();
-  } finally {
-    release?.();
-    if (challengeVerificationLocks.get(challengeId) === current) {
-      challengeVerificationLocks.delete(challengeId);
-    }
-  }
-}
-
-/**
- * Whether a challenge is expired at `nowMs`.
- *
- * Expiry is **inclusive**: a challenge whose `expiresAtMs` equals the current
- * time is already expired. `expiresAtMs` is the first instant at which the
- * challenge is no longer valid, not the last instant at which it still is.
- * Exclusive comparison (`<`) would leave a one-millisecond window in which a
- * challenge past its stated deadline still authenticates, so the boundary is
- * closed on the expired side.
- */
-export function isChallengeExpired(expiresAtMs: number, nowMs: number = Date.now()) {
-  return expiresAtMs <= nowMs;
-}
 
 function getChallengeTtlSeconds() {
   const parsed = Number(process.env.FORTEXA_AUTH_CHALLENGE_TTL_SECONDS ?? 300);
@@ -68,7 +37,7 @@ function getChallengeTtlSeconds() {
   return Math.floor(parsed);
 }
 
-export function buildChallengeMessage(input: {
+export function buildChallengeMessage(input: {}
   challengeId: string;
   publicKey: string;
   expiresAtMs: number;
@@ -169,33 +138,42 @@ export async function createWalletChallenge(publicKey: string): Promise<WalletCh
 
 export type ChallengeVerificationResult =
   | { ok: true; challenge: WalletChallengeRecord }
-  | { ok: false; code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature" };
+  | { ok: false; code: "missing" | "expired" | "replayed" | "wallet_mismatch" | "invalid_signature" | "locked" };
 
 export async function verifyWalletChallenge(input: {
   challengeId: string;
   publicKey: string;
   signature: string;
 }): Promise<ChallengeVerificationResult> {
-  return withChallengeVerificationLock(input.challengeId, async () => {
-    const normalizedKey = normalizeWalletPublicKey(input.publicKey);
-    const challenge = await readChallenge(input.challengeId);
+  const normalizedKey = normalizeWalletPublicKey(input.publicKey);
+  const challenge = await readChallenge(input.challengeId);
 
-    if (!challenge) {
-      return { ok: false, code: "missing" };
-    }
+  if (!challenge) {
+    return { ok: false, code: "missing" };
+  }
 
-    // Expired challenges are dead regardless of the presenting wallet.
-    if (isChallengeExpired(challenge.expiresAtMs)) {
-      await removeChallenge(input.challengeId);
-      return { ok: false, code: "expired" };
-    }
+  if (challenge.publicKey !== normalizedKey) {
+    return { ok: false, code: "wallet_mismatch" };
+  }
 
-    if (challenge.publicKey !== normalizedKey) {
-      return { ok: false, code: "wallet_mismatch" };
-    }
+  if (challenge.expiresAtMs <= Date.now()) {
+    await removeChallenge(input.challengeId);
+    return { ok: false, code: "expired" };
+  }
 
-    if (challenge.consumed) {
-      return { ok: false, code: "replayed" };
+  if (challenge.consumed) {
+    return { ok: false, code: "replayed" };
+  }
+
+    // Lockout is checked before any session is created. The challenge is
+    // consumed and a failure recorded against the user id so a lock survives
+    // refresh and a second wallet login.
+    const lockout = await checkLoginLockout(normalizedKey);
+    if (lockout.locked) {
+      challenge.consumed = true;
+      await writeChallenge(challenge);
+      await recordLoginFailure(normalizedKey);
+      return { ok: false, code: "locked" };
     }
 
     const signatureValid = verifyWalletSignature(normalizedKey, challenge.message, input.signature);
@@ -203,19 +181,19 @@ export async function verifyWalletChallenge(input: {
     await writeChallenge(challenge);
 
     if (!signatureValid) {
+      await recordLoginFailure(normalizedKey);
       return { ok: false, code: "invalid_signature" };
     }
 
-    return {
-      ok: true,
-      challenge: {
-        id: challenge.id,
-        publicKey: challenge.publicKey,
-        message: challenge.message,
-        expiresAtMs: challenge.expiresAtMs,
-      },
-    };
-  });
+  return {
+    ok: true,
+    challenge: {
+      id: challenge.id,
+      publicKey: challenge.publicKey,
+      message: challenge.message,
+      expiresAtMs: challenge.expiresAtMs,
+    },
+  };
 }
 
 export async function resetWalletChallengeStore() {

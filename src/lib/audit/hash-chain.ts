@@ -55,6 +55,36 @@ export type ChainVerificationResult =
       legacyCount: number;
     };
 
+/**
+ * Maximum number of rows a single audit export may contain. Shared by every
+ * export format so JSON and CSV never disagree about what is exportable.
+ */
+export const DEFAULT_MAX_CHAIN_ROWS = 10_000;
+
+/** Error raised when an export must be refused instead of written. */
+export class AuditChainError extends Error {
+  readonly code: string;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    code: string,
+    message: string,
+    details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = "AuditChainError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/** The verified chain bundle returned by {@link verifyAuditChain}. */
+export interface VerifiedChain {
+  entries: AuditEntry[];
+  boundaries: ChainBoundaries;
+  result: ChainVerificationResult;
+}
+
 /** Hashes that identify the expected boundaries of an exported chain. */
 export interface ChainBoundaries {
   firstEntryHash?: string;
@@ -179,4 +209,34 @@ export function verifyHashChain(
   }
 
   return { valid: true, checkedCount, legacyCount };
+}
+
+/**
+ * Single entry point for verifiers that must agree with each other (the audit
+ * export route and the integrity route).
+ *
+ * The row cap is enforced before verification so an over-cap export is refused
+ * without hashing every row, and the returned `boundaries` are the exact ones
+ * the chain was verified against so callers can echo them in the response.
+ *
+ * Throws {@link AuditChainError} with code `audit_chain_row_cap_exceeded` when
+ * the row cap is exceeded. A broken chain is reported through `result.valid`
+ * rather than thrown, so callers choose how to surface the verifier's reason.
+ */
+export function verifyAuditChain(
+  entries: AuditEntry[],
+  options: { boundaries?: ChainBoundaries; maxRows?: number } = {},
+): VerifiedChain {
+  const maxRows = options.maxRows ?? DEFAULT_MAX_CHAIN_ROWS;
+  if (entries.length > maxRows) {
+    throw new AuditChainError(
+      "audit_chain_row_cap_exceeded",
+      `Audit chain exceeds the maximum of ${maxRows} rows.`,
+      { maxRows, rowCount: entries.length },
+    );
+  }
+
+  const boundaries = options.boundaries ?? getChainBoundaries(entries);
+  const result = verifyHashChain(entries, boundaries);
+  return { entries, boundaries, result };
 }

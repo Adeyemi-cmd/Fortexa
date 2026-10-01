@@ -6,7 +6,7 @@ import { getReadiness } from "@/lib/readiness/checks";
 import { readinessBody } from "@/lib/readiness/gate";
 import { getBlocklistHealth } from "@/lib/security/blocklist";
 import { getHorizonServer } from "@/lib/stellar/client";
-import { runWithDatabase } from "@/lib/storage/db";
+import { getDatabaseMigrationStatus } from "@/lib/storage/db";
 
 export async function GET(request: NextRequest) {
   const startedAtMs = Date.now();
@@ -24,8 +24,12 @@ export async function GET(request: NextRequest) {
     hasHorizonUrl: Boolean(process.env.STELLAR_HORIZON_URL),
   };
 
-  const storageCheck = await runWithDatabase("health-check", (pool) => pool.query("SELECT 1"));
-  const storageStatus = storageCheck.available ? "healthy" : "degraded";
+  const migrations = await getDatabaseMigrationStatus();
+  const storageStatus = !migrations.configured
+    ? "degraded"
+    : migrations.ready
+      ? "healthy"
+      : "not_ready";
 
   let horizonStatus = "unknown";
   if (env.hasHorizonUrl) {
@@ -51,6 +55,7 @@ export async function GET(request: NextRequest) {
     blocklist: blocklistStatus,
     groq: groqStatus,
   };
+  const ready = storageStatus !== "not_ready";
 
   return jsonWithRequestContext(request, {
     route: "/api/health",
@@ -61,6 +66,7 @@ export async function GET(request: NextRequest) {
       service: "fortexa",
       timestamp: new Date().toISOString(),
       env,
+      migrations,
       blocklist: blocklistData,
       dependencies,
     },
