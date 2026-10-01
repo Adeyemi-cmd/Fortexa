@@ -11,6 +11,7 @@ import {
   logWarn,
 } from "@/lib/observability/logger";
 import { recordDecisionOutcome } from "@/lib/observability/metrics";
+import { redactSensitiveFields } from "@/lib/observability/redact";
 import { demoScenarios } from "@/lib/scenarios/seed";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import {
@@ -165,9 +166,15 @@ export async function POST(request: NextRequest) {
       headers: rateLimitHeaders(rate),
     });
   } catch (error) {
+    // #205: pass error detail through the shared observability redactor so
+    // destination addresses, memos, and secret-bearing values never reach logs.
+    // The API metric for this 500 response is still recorded by
+    // jsonWithRequestContext — redaction must not suppress it.
+    const redactedDetail =
+      error instanceof Error ? redactSensitiveFields(error.message) : "unknown";
     logError("Decision route internal error", {
       ...context,
-      detail: error instanceof Error ? error.message : "unknown",
+      detail: redactedDetail,
     });
     return jsonWithRequestContext(request, {
       route: "/api/decision",
