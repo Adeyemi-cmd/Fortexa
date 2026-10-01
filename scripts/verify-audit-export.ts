@@ -50,7 +50,7 @@ export function extractExportPayload(data: unknown): ExtractedExport {
 
 function formatResult(result: ChainVerificationResult, label: string): string {
   if (result.valid) {
-    return `${label}: ✓ valid (${result.checkedCount} checked, ${result.legacyCount} legacy)`;
+    return `${label}: – valid (${result.checkedCount} checked, ${result.legacyCount} legacy)`;
   }
   return `${label}: ✗ INVALID — ${result.reason}` +
     (result.entryId ? ` at entry "${result.entryId}"` : "") +
@@ -94,7 +94,7 @@ function main(filePath: string): never {
       console.log(`✓ Audit export valid — ${result.checkedCount} entries checked, ${result.legacyCount} legacy`);
       process.exit(0);
     } else {
-      console.log(`✗ Audit export INVALID — ${result.reason}` +
+      console.log(#✗', `Audit export INVALID — ${result.reason}` +
         (result.entryId ? ` at entry "${result.entryId}"` : "") +
         (result.index !== undefined ? ` (index ${result.index})` : ""));
       console.log(`  checked: ${result.checkedCount}, legacy: ${result.legacyCount}`);

@@ -1,8 +1,12 @@
 import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
-import { runWithDatabase, runWithDatabaseStrict } from "@/lib/storage/db";
+import {
+  GENESIS_HASH,
+  computeEntryHash,
+  verifyHashChain,
+} from "@/lib/audit/hash-chain";
+import { runWithDatabase } from "@/lib/storage/db";
 import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
 
@@ -10,6 +14,8 @@ type AuditStoreFile = {
   auditByUser: Record<string, AuditEntry[]>;
   usageByUser: Record<string, DailyUsage>;
 };
+
+export const AUDIT_EXPORT_MAX_ROWS = 10000;
 
 export type AuditFilter = {
   from?: string;
@@ -27,6 +33,8 @@ const VALID_DECISIONS: DecisionType[] = [
 ];
 const VALID_DECISION_SET = new Set<string>(VALID_DECISIONS);
 
+const REDACTED = "[REDACTED]";
+
 export function validateAuditFilter(filter: AuditFilter): string | null {
   if (filter.from !== undefined && isNaN(Date.parse(filter.from))) {
     return "Invalid 'from' date. Use ISO 8601 format (e.g. 2025-01-01T00:00:00Z).";
@@ -41,6 +49,70 @@ export function validateAuditFilter(filter: AuditFilter): string | null {
     return `Invalid decision '${filter.decision}'. Must be one of: ${VALID_DECISIONS.join(", ")}.`;
   }
   return null;
+}
+
+const CREDENTIAL_KEY_PATTERN =
+  /(secret|token|password|passwd|api[_-]?key|apikey|authorization|auth|credential|private[_-]?key|access[_-]?key|bearer|cookie|session)/i;
+
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (CREDENTIAL_KEY_PATTERN.test(key)) {
+        result[key] = REDACTED;
+      } else {
+        result[key] = redactValue(nested);
+      }
+    }
+    return result;
+  }
+  return value;
+}
+
+export function redactAuditEntry(entry: AuditEntry): AuditEntry {
+  return redactValue(entry) as AuditEntry;
+}
+
+export type AuditExportResult =
+  | { ok: true; entries: AuditEntry[] }
+  | { ok: false; error: string; code: "CHAIN_INVALID" | "ROW_CAP_EXCEEDED" };
+
+export async function exportVerifiedAuditEntries(
+  userId: string,
+  filter?: AuditFilter,
+): Promise<AuditExportResult> {
+  const entries = await listAuditEntries(userId, filter);
+  return verifyAndRedactExport(entries);
+}
+
+export function verifyAndRedactExport(
+  entries: AuditEntry[],
+): AuditExportResult {
+  if (entries.length > AUDIT_EXPORT_MAX_ROWS) {
+    return {
+      ok: false,
+      code: "ROW_CAP_EXCEEDED",
+      error: `Audit export exceeds maximum of ${AUDIT_EXPORT_MAX_ROWS} rows.`,
+    };
+  }
+
+  const ordered = [...entries].sort((a, b) =>
+    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
+  );
+
+  const verification = verifyHashChain(ordered);
+  if (!verification.valid) {
+    return {
+      ok: false,
+      code: "CHAIN_INVALID",
+      error: verification.error ?? "Audit hash chain failed verification.",
+    };
+  }
+
+  return { ok: true, entries: ordered.map((entry) => redactAuditEntry(entry)) };
 }
 
 function applyFilter(
