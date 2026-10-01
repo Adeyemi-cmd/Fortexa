@@ -1,4 +1,4 @@
-import { evaluateDecision } from "@/lib/decision/engine";
+import { evaluateDecision, type PaymentComparison } from "@/lib/decision/engine";
 import { demoScenarios } from "@/lib/scenarios/seed";
 import type {
   AgentAction,
@@ -24,6 +24,13 @@ export interface SimulationInputCase {
   label: string;
   source: SimulationSource;
   action: AgentAction;
+  /**
+   * Optional payment comparison (asset, amount, destination, memo, network).
+   * When present it is evaluated through the SAME evaluateDecision function
+   * the live /api/decision route uses, so simulate and decide cannot drift.
+   * When absent, only action/policy/security checks run (backward compatible).
+   */
+  payment?: PaymentComparison;
 }
 
 /** Current-vs-proposed decision comparison for one action. */
@@ -64,6 +71,10 @@ export function scenarioCases(): SimulationInputCase[] {
  * Build simulation cases from a user's audit history. Entries are expected to
  * arrive most-recent-first; the newest `sampleSize` are used so the sample is
  * deterministic.
+ *
+ * When an audit entry carries a paymentQuote, it is attached as the case
+ * payment so the simulation re-evaluates the exact asset/amount/destination/
+ * memo the live decision authorized — same engine, same inputs.
  */
 export function auditSampleCases(entries: AuditEntry[], sampleSize: number = DEFAULT_AUDIT_SAMPLE_SIZE): SimulationInputCase[] {
   const size = Math.max(0, Math.min(sampleSize, MAX_AUDIT_SAMPLE_SIZE));
@@ -72,6 +83,17 @@ export function auditSampleCases(entries: AuditEntry[], sampleSize: number = DEF
     label: entry.action.name,
     source: "audit",
     action: entry.action,
+    ...(entry.paymentQuote
+      ? {
+          payment: {
+            asset: entry.paymentQuote.asset,
+            amount: entry.paymentQuote.amountXLM,
+            destination: entry.paymentQuote.destination,
+            memo: entry.paymentQuote.memo,
+            network: entry.paymentQuote.network,
+          } satisfies PaymentComparison,
+        }
+      : {}),
   }));
 }
 
@@ -82,6 +104,10 @@ export function auditSampleCases(entries: AuditEntry[], sampleSize: number = DEF
  * This is a pure read-only computation: it never persists policy and never
  * consumes usage. Each action is evaluated against the same `usage` snapshot so
  * the result is deterministic regardless of evaluation order.
+ *
+ * Each case runs through the shared evaluateDecision engine (the same function
+ * /api/decision uses), including its optional payment comparison. No
+ * transaction is built or submitted here.
  */
 export async function simulatePolicyChange(params: {
   currentPolicy: PolicyConfig;
@@ -96,8 +122,8 @@ export async function simulatePolicyChange(params: {
   const proposedCounts = emptyDecisionCounts();
 
   for (const input of cases) {
-    const current = await evaluateDecision(input.action, currentPolicy, usage);
-    const proposed = await evaluateDecision(input.action, proposedPolicy, usage);
+    const current = await evaluateDecision(input.action, currentPolicy, usage, input.payment);
+    const proposed = await evaluateDecision(input.action, proposedPolicy, usage, input.payment);
 
     currentCounts[current.decision] += 1;
     proposedCounts[proposed.decision] += 1;

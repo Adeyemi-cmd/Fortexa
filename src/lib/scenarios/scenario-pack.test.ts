@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { evaluateDecision } from "@/lib/decision/engine";
 import { defaultPolicyConfig } from "@/lib/policy/engine";
+import {
+  evaluateScenarioCatalog,
+  validateScenarioPack,
+  type ScenarioEvaluation,
+  type SeedScenarioInput,
+} from "@/lib/scenarios/evaluate";
 import { demoScenarios } from "@/lib/scenarios/seed";
-import type { DailyUsage, PolicyConfig } from "@/lib/types/domain";
+import type { DailyUsage, PolicyConfig, Scenario } from "@/lib/types/domain";
 
 const noTimePolicy: PolicyConfig = { ...defaultPolicyConfig, allowedHours: undefined };
 
@@ -183,5 +189,83 @@ describe("policy pack regression suite", () => {
         );
       }
     });
+  });
+});
+
+describe("scenario pack drift guard", () => {
+  const originalBlocklistUrl = process.env.FORTEXA_BLOCKLIST_URL;
+
+  const runWithoutNetwork = async (): Promise<ScenarioEvaluation[]> => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("network access is forbidden in the scenario pack suite"));
+    try {
+      return await evaluateScenarioCatalog();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  };
+
+  it("every seed entry declares an expected decision", () => {
+    const issues = validateScenarioPack({ scenarios: demoScenarios });
+    const missing = issues.filter((issue) => issue.kind === "missing-expected-decision");
+    expect(missing).toEqual([]);
+  });
+
+  it("matches every seeded scenario decision against the engine", async () => {
+    const evaluations = await runWithoutNetwork();
+    expect(evaluations).toHaveLength(demoScenarios.length);
+
+    const issues = validateScenarioPack({ scenarios: demoScenarios, evaluations });
+    expect(
+      issues,
+      issues.map((issue) => issue.message).join("\n")
+    ).toEqual([]);
+
+    for (const evaluation of evaluations) {
+      expect(evaluation.matches, `scenario ${evaluation.scenario.id} drifted`).toBe(true);
+    }
+  });
+
+  it("fails when a seeded expected decision is mutated away from engine output", async () => {
+    const evaluations = await runWithoutNetwork();
+
+    const mutated: Scenario[] = demoScenarios.map((scenario, index) =>
+      index === 0
+        ? { ...scenario, expectedDecision: "BLOCK" as Scenario["expectedDecision"] }
+        : scenario
+    );
+
+    const issues = validateScenarioPack({ scenarios: mutated, evaluations });
+    const mismatch = issues.find((issue) => issue.kind === "decision-mismatch");
+
+    expect(mismatch).toBeDefined();
+    expect(mismatch!.scenarioId).toBe("safe-research-payment");
+    expect(mismatch!.message).toContain("seed expects BLOCK");
+    expect(mismatch!.message).toContain("engine returned APPROVE");
+    expect(mismatch!.message).toContain("src/lib/scenarios/seed.ts");
+  });
+
+  it("fails when a seed entry has no expected decision", () => {
+    const broken: SeedScenarioInput[] = [
+      { ...demoScenarios[0]!, expectedDecision: undefined },
+    ];
+
+    const issues = validateScenarioPack({ scenarios: broken });
+    expect(issues).toHaveLength(1);
+    expect(issues[0]!.kind).toBe("missing-expected-decision");
+    expect(issues[0]!.scenarioId).toBe("safe-research-payment");
+  });
+
+  it("evaluates the catalog without contacting Horizon or any network endpoint", async () => {
+    delete process.env.FORTEXA_BLOCKLIST_URL;
+    try {
+      const evaluations = await runWithoutNetwork();
+      expect(evaluations).toHaveLength(demoScenarios.length);
+    } finally {
+      if (originalBlocklistUrl !== undefined) {
+        process.env.FORTEXA_BLOCKLIST_URL = originalBlocklistUrl;
+      }
+    }
   });
 });

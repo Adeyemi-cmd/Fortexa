@@ -1,9 +1,13 @@
-"use client";
+import { type ReactNode } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+import { getSessionRole } from '@/lib/auth/wallet-role';
+import { getSession } from '@/lib/auth/session';
 
 import { useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   Terminal,
@@ -72,6 +76,7 @@ function SessionChip({
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const isPublicRoute = pathname === "/" || pathname === "/login";
   const { wallet, role, loading } = useAuthSession();
   const [loggingOut, setLoggingOut] = useState(false);
@@ -92,7 +97,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
     } finally {
-      window.location.href = "/login";
+      // Re-render server components against the cleared session so no stale
+      // authenticated view survives the logout.
+      router.refresh();
+      router.push("/login");
     }
   }
 

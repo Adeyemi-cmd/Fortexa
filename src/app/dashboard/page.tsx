@@ -1,11 +1,11 @@
 import Link from "next/link";
-import { ArrowRight, Shield, AlertTriangle, BadgeCheck, Wallet } from "lucide-react";
+import { Shield, AlertTriangle, BadgeCheck, Wallet } from "lucide-react";
 import { cookies } from "next/headers";
 
 import { ActivityTimeline } from "@/components/activity-timeline";
+import { DashboardActions } from "@/components/dashboard-actions";
 import { WalletStatusCard } from "@/components/wallet-status-card";
 import { StatCard } from "@/components/ui/stat-card";
-import { Button } from "@/components/ui/button";
 import { AUTH_COOKIE_KEY, verifySessionToken } from "@/lib/auth/session";
 import { defaultPolicyConfig } from "@/lib/policy/engine";
 import { demoScenarios } from "@/lib/scenarios/seed";
@@ -26,14 +26,12 @@ export default async function DashboardPage() {
             Policy posture, wallet status, and recent activity at a glance.
           </p>
         </div>
-        <Link href="/console">
-          <Button className="gap-2">
-            Run evaluation <ArrowRight aria-hidden="true" className="h-4 w-4" />
-          </Button>
-        </Link>
       </div>
 
       <WalletStatusCard compact />
+
+      {/* Payment and policy actions render only once /api/health reports ready. */}
+      <DashboardActions />
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
