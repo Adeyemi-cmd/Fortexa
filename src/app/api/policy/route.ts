@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
@@ -82,6 +83,21 @@ export async function POST(request: NextRequest) {
 
   try {
     const bodyResult = await readJsonBody(request);
+    if (bodyResult.ok && isLoginAuthorizationPayload(bodyResult.data)) {
+      logWarn("Policy update rejected login payload", {
+        ...context,
+        userId: auth.session.userId,
+        code: "login_payload",
+      });
+      return jsonWithRequestContext(request, {
+        route: "/api/policy",
+        startedAtMs,
+        status: 400,
+        body: { error: "Login signatures cannot authorize a policy write." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
     if (!bodyResult.ok) {
       logWarn("Policy update payload too large", { ...context, userId: auth.session.userId });
       return jsonWithRequestContext(request, {
@@ -153,6 +169,35 @@ export async function POST(request: NextRequest) {
         body: { error: "Invalid policy payload.", details: toPublicValidationDetails(parsed.error) },
         headers: rateLimitHeaders(rate),
       });
+    }
+
+    // A client can bypass the editor and POST here directly, so run the same
+    // rule-level check the validate route runs. A document the validate route
+    // rejects must never activate through this route either.
+    try {
+      validateNoDuplicateRules(parsed.data);
+    } catch (error) {
+      if (error instanceof DuplicateRuleError) {
+        logWarn("Policy update rejected: duplicate rule identifier", {
+          ...context,
+          userId: auth.session.userId,
+          field: error.field,
+          duplicateValue: error.value,
+        });
+        return jsonWithRequestContext(request, {
+          route: "/api/policy",
+          startedAtMs,
+          status: 422,
+          body: {
+            error: error.message,
+            code: "DUPLICATE_RULE_IDENTIFIER",
+            field: error.field,
+            duplicateValue: error.value,
+          },
+          headers: rateLimitHeaders(rate),
+        });
+      }
+      throw error;
     }
 
     const versionMeta = z.object({

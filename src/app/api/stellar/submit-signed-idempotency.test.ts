@@ -12,6 +12,8 @@ vi.hoisted(() => {
 
 const horizonMocks = vi.hoisted(() => ({
   submitTransaction: vi.fn(),
+  getAuditEntry: vi.fn(),
+  verifyQuote: vi.fn(),
 }));
 
 const storeMocks = vi.hoisted(() => ({
@@ -82,7 +84,7 @@ function horizonAccepted(hash = mockTxHash) {
 function operatorCookie() {
   const token = createSessionToken({
     email: "idem-operator@fortexa.local",
-    role: "operator",
+    role: "signer",
     userId: OPERATOR_USER_ID,
     expiresInSeconds: 300,
   });
@@ -98,7 +100,7 @@ function submitRequest(body: unknown, extraHeaders: Record<string, string> = {})
       cookie: operatorCookie(),
       ...extraHeaders,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ auditEntryId: "00000000-0000-4000-8000-000000000000", ...(body as Record<string, unknown>) }),
   });
 }
 
@@ -136,6 +138,11 @@ function deferred<T>() {
     resolve = res;
     reject = rej;
   });
+  horizonMocks.getAuditEntry.mockResolvedValue({
+    id: "00000000-0000-4000-8000-000000000000",
+    paymentQuote: { memo: "fortexa:idempotency-test" },
+  });
+  horizonMocks.verifyQuote.mockReturnValue({ ok: true, quote: {} });
 
   return { promise, resolve, reject };
 }

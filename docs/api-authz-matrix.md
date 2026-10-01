@@ -11,7 +11,7 @@ Fortexa uses two roles:
 | **operator** | Full access — can read and write policy, trigger decisions, build and submit Stellar transactions |
 | **viewer** | Read-only access — can read policy and audit entries, but cannot modify state |
 
-Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticated requests (no valid cookie) receive **401 Unauthorized**. Authenticated requests with an insufficient role receive **403 Forbidden**.
+Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`) carrying a generation counter that is checked against the server-side session store. Unauthenticated requests (no valid cookie) receive **401 Unauthorized**. Authenticated requests with an insufficient role receive **403 Forbidden**.
 
 ---
 
@@ -23,9 +23,9 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticat
 |--------|-------|-------------|-----------------|--------|----------------|-------|
 | GET | `/api/auth/challenge` | Public | 200 (challenge issued) | 200 | No | Issues a SEP-53 wallet challenge; rate-limited |
 | POST | `/api/auth/login` | Public | 200 (sets session cookie) | 200 | Yes | Verifies wallet signature; sets `fortexa_session` cookie |
-| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Revokes the presented session id server-side (every token generation of that login) and clears the cookie; no auth check |
-| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid, non-revoked session; extends token TTL and keeps the session id |
-| GET | `/api/auth/session` | Public | 200 (no session body) | 200 | No | Returns session metadata if the cookie verifies and its session id is not revoked; safe to call unauthenticated |
+| POST | `/api/auth/logout` | Public | 200 (clears cookie) | 200 | Yes | Clears the session cookie and revokes every generation of the presented session; no auth check |
+| POST | `/api/auth/refresh` | operator, viewer | 401 | 200 | Yes (refreshes token) | Requires valid session; rotates the cookie generation, so the previous cookie is rejected on the next request |
+| GET | `/api/auth/session` | Public | 200 (no session body) | 200 | No | Returns session metadata if cookie is valid; safe to call unauthenticated |
 
 ### Health & Metrics Routes
 
@@ -63,9 +63,9 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`). Unauthenticat
 |--------|-------|-------------|-----------------|--------|----------------|-------|
 | GET | `/api/stellar/balance` | operator, viewer | 401 | 200 | No | Returns XLM balance for the authenticated user's linked wallet |
 | POST | `/api/stellar/setup` | operator, viewer | 401 | 200 | Yes | Links a Stellar wallet to the current user session |
-| POST | `/api/stellar/build-payment` | operator only | 401 | 403 | No (builds unsigned XDR) | Constructs an unsigned Stellar payment transaction; requires a prior authorized audit entry |
-| POST | `/api/stellar/submit-signed` | operator only | 401 | 403 | Yes | Submits a user-signed XDR to the Stellar network |
-| POST | `/api/stellar/pay` | operator only | 401 | 403 | Yes | **Disabled** — returns 410 Gone |
+| POST | `/api/stellar/build-payment` | signer only | 401 | 403 | No (builds unsigned XDR) | Constructs an unsigned Stellar payment transaction; requires a prior authorized audit entry |
+| POST | `/api/stellar/submit-signed` | signer only | 401 | 403 | Yes | Requires the audit entry ID and a signed native payment matching its unexpired APPROVE/WARN quote |
+| POST | `/api/stellar/pay` | signer only | 401 | 403 | Yes | **Disabled** — direct payment remains unavailable |
 | POST | `/api/stellar/fund` | operator, viewer | 401 | 200 | Yes | **Deprecated** — returns 410 Gone |
 
 ### Agent Routes
@@ -113,4 +113,4 @@ Request
 - `requireAuth()` defaults to `allowedRoles: ["operator", "viewer"]` when no options are passed.
 - Adding a new protected route: call `requireAuth(request, { allowedRoles: [...] })` and add a row to this matrix.
 - The `FORTEXA_AUTH_SECRET` environment variable must be set; without it, no session tokens can be verified.
-- Role assignment is controlled by `FORTEXA_OPERATOR_WALLETS` and `FORTEXA_VIEWER_WALLETS` env vars (comma-separated Stellar public keys).
+- Role assignment is controlled by `FORTEXA_OPERATOR_WALLETS`, `FORTEXA_SIGNER_WALLETS`, and `FORTEXA_VIEWER_WALLETS` (comma-separated Stellar public keys). A wallet may appear in both operator and signer lists to receive both roles.

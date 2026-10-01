@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import path from "node:path";
+
 import { Keypair } from "@stellar/stellar-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -23,6 +26,7 @@ describe("wallet challenge", () => {
     vi.useRealTimers();
     delete process.env.FORTEXA_AUTH_CHALLENGE_TTL_SECONDS;
     await resetWalletChallengeStore();
+    delete process.env.FORTEXA_SHARED_STATE_PATH;
   });
 
   it("creates a challenge message bound to wallet and expiry", async () => {
@@ -32,10 +36,15 @@ describe("wallet challenge", () => {
     expect(challenge.message).toContain(`Wallet: ${TEST_PUBLIC_KEY}`);
     expect(challenge.message).toContain(`Challenge: ${challenge.id}`);
     expect(challenge.expiresAtMs).toBeGreaterThan(Date.now());
+    expect(challenge.message).toContain(`Origin: ${challenge.origin}`);
+    expect(challenge.message).toContain(`Nonce: ${challenge.nonce}`);
+    expect(challenge.message).toContain("Expires: ");
     expect(buildChallengeMessage({
       challengeId: challenge.id,
       publicKey: challenge.publicKey,
       expiresAtMs: challenge.expiresAtMs,
+      origin: challenge.origin,
+      nonce: challenge.nonce,
     })).toBe(challenge.message);
   });
 
@@ -60,25 +69,49 @@ describe("wallet challenge", () => {
       signature,
     });
 
-    expect(replayed).toEqual({ ok: false, code: "replayed" });
+    expect(replayed).toEqual({ ok: false, code: "missing" });
   });
 
   it("rejects expired challenges", async () => {
-    vi.useFakeTimers();
     process.env.FORTEXA_AUTH_CHALLENGE_TTL_SECONDS = "60";
+    let now = Date.parse("2026-01-01T00:00:00.000Z");
+    const clock = () => now;
 
-    const challenge = await createWalletChallenge(TEST_PUBLIC_KEY);
+    const challenge = await createWalletChallenge(TEST_PUBLIC_KEY, clock);
     const signature = signSep53Message(TEST_SECRET, challenge.message);
 
-    vi.advanceTimersByTime(61_000);
+    now += 61_000;
 
     const result = await verifyWalletChallenge({
       challengeId: challenge.id,
       publicKey: TEST_PUBLIC_KEY,
       signature,
-    });
+    }, clock);
 
     expect(result).toEqual({ ok: false, code: "expired" });
+    expect(await verifyWalletChallenge({
+      challengeId: challenge.id,
+      publicKey: TEST_PUBLIC_KEY,
+      signature,
+    }, clock)).toEqual({ ok: false, code: "missing" });
+  });
+
+  it("consumes a challenge when a different wallet key signs it", async () => {
+    const challenge = await createWalletChallenge(TEST_PUBLIC_KEY);
+    const otherKeypair = Keypair.random();
+    const otherSignature = otherKeypair.sign(hashSep53Message(challenge.message)).toString("base64");
+
+    expect(await verifyWalletChallenge({
+      challengeId: challenge.id,
+      publicKey: otherKeypair.publicKey(),
+      signature: otherSignature,
+    })).toEqual({ ok: false, code: "wallet_mismatch" });
+
+    expect(await verifyWalletChallenge({
+      challengeId: challenge.id,
+      publicKey: TEST_PUBLIC_KEY,
+      signature: signSep53Message(TEST_SECRET, challenge.message),
+    })).toEqual({ ok: false, code: "missing" });
   });
 
   it("rejects invalid signatures without allowing replay", async () => {
@@ -101,6 +134,6 @@ describe("wallet challenge", () => {
       signature: badSignature,
     });
 
-    expect(replayed).toEqual({ ok: false, code: "replayed" });
+    expect(replayed).toEqual({ ok: false, code: "missing" });
   });
 });

@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { readJsonBody } from "@/lib/http/read-json-body";
 import { jsonWithRequestContext } from "@/lib/observability/http";
 import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observability/logger";
@@ -20,6 +21,7 @@ import {
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarSubmitSignedRequestSchema } from "@/lib/validation/schemas";
 import { normalizeHorizonError } from "@/lib/utils/horizonErrors";
+import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 
 type HorizonErrorContext = {
   explanation: string;
@@ -139,7 +141,7 @@ export async function POST(request: NextRequest) {
   maybeRunCleanup();
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       logWarn("Submit signed route unauthorized", context);
@@ -189,6 +191,41 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedPayload.data;
+
+    if (!xdrSourceResult.payment) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction does not contain one authorized native payment." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
+    if (!auditEntry?.paymentQuote || xdrSourceResult.payment.memo !== auditEntry.paymentQuote.memo) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction memo does not match the authorized payment quote." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const authorization = verifyPaymentAgainstQuote(auditEntry, {
+      ...xdrSourceResult.payment,
+      network: "testnet",
+    });
+    if (!authorization.ok) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: authorization.status,
+        body: { error: authorization.error, field: authorization.field },
+        headers: rateLimitHeaders(rate),
+      });
+    }
 
     const headerKey = request.headers.get("idempotency-key")?.trim();
     const bodyKey = payload.idempotencyKey?.trim();

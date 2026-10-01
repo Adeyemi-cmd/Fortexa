@@ -147,10 +147,22 @@ function blocklistCheck(
   return [];
 }
 
+function isTimeoutFailure(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error.name === "AbortError" || error.name === "TimeoutError")
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /abort|timeout/i.test(message);
+}
+
 /**
- * Fetch the blocklist and report whether the feed was reachable.
- * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
- * failure we fall back to an empty list and report the degraded status.
+ * Fetch blocklist with timeout support. Returns the blocklist (possibly
+ * cached) plus a status describing whether the fetch succeeded, timed out,
+ * or failed. Never throws: failures degrade to an empty blocklist.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
@@ -158,17 +170,32 @@ async function fetchBlocklistWithTimeout(): Promise<{
 }> {
   try {
     const blocklist = await fetchBlocklist();
+    const health = getBlocklistHealth();
+    if (health.lastError) {
+      return {
+        blocklist,
+        status: {
+          blocked: true,
+          timedOut: /abort|timeout/i.test(health.lastError),
+          error: health.lastError,
+        },
+      };
+    }
+
     return { blocklist, status: { blocked: false, timedOut: false } };
   } catch (err) {
     const health = getBlocklistHealth();
-    const error =
-      health.lastError ??
-      (err instanceof Error ? err.message : "Unknown fetch error");
-    const timedOut =
-      (err instanceof Error &&
-        (err.name === "AbortError" || err.name === "TimeoutError")) ||
-      /abort|timed? ?out/i.test(error);
-    return { blocklist: [], status: { blocked: true, timedOut, error } };
+    const error = health.lastError ?? (err instanceof Error ? err.message : "Blocklist fetch failed");
+    const timedOut = (err instanceof Error && err.name === "AbortError") || /abort|timeout/i.test(error);
+
+    return {
+      blocklist: [],
+      status: {
+        blocked: true,
+        timedOut,
+        error,
+      },
+    };
   }
 }
 

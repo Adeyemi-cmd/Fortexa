@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { GENESIS_HASH, computeEntryHash } from "@/lib/audit/hash-chain";
 import { runWithDatabase, runWithDatabaseStrict } from "@/lib/storage/db";
-import { getFortexaStoreDir, getFortexaStorePath } from "@/lib/storage/paths";
+import { getFortexaStoreDir, resolveContainedStorePath, type ContainedStorePath } from "@/lib/storage/paths";
 import type { AuditEntry, DailyUsage, DecisionType } from "@/lib/types/domain";
 
 type AuditStoreFile = {
@@ -69,7 +69,8 @@ function applyFilter(
   });
 }
 
-const storePath = getFortexaStorePath("audit.json");
+export const AUDIT_STORE_FILE_NAME = "audit.json";
+
 let fallbackMutationQueue = Promise.resolve();
 
 function withFallbackMutationLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -84,8 +85,15 @@ const baselineUsage: DailyUsage = {
   lastUpdated: new Date().toISOString(),
 };
 
-async function ensureStore() {
+/**
+ * Opens the audit file store, creating it if missing, and returns its path.
+ * The path comes only from resolveContainedStorePath, so a name that escapes
+ * the data directory (`..`, an absolute path, or a symlink pointing outside)
+ * throws StoragePathError before anything is read or written.
+ */
+export async function openAuditFileStore(fileName: string = AUDIT_STORE_FILE_NAME): Promise<ContainedStorePath> {
   await fs.mkdir(getFortexaStoreDir(), { recursive: true });
+  const storePath = await resolveContainedStorePath(fileName);
   try {
     await fs.access(storePath);
   } catch {
@@ -95,15 +103,17 @@ async function ensureStore() {
     };
     await fs.writeFile(storePath, JSON.stringify(initial, null, 2), "utf8");
   }
+  return storePath;
 }
 
 async function readStore(): Promise<AuditStoreFile> {
-  await ensureStore();
+  const storePath = await openAuditFileStore();
   const raw = await fs.readFile(storePath, "utf8");
   return JSON.parse(raw) as AuditStoreFile;
 }
 
 async function writeStore(store: AuditStoreFile) {
+  const storePath = await openAuditFileStore();
   const tempPath = `${storePath}.${randomUUID()}.tmp`;
   try {
     await fs.writeFile(tempPath, JSON.stringify(store, null, 2), "utf8");

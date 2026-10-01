@@ -67,12 +67,23 @@ function operatorCookie() {
   return `${AUTH_COOKIE_KEY}=${token}`;
 }
 
-function jsonRequest(url: string, body: unknown) {
+function signerCookie() {
+  const token = createSessionToken({
+    email: "signer@fortexa.local",
+    role: "signer",
+    userId: OPERATOR_USER_ID,
+    expiresInSeconds: 300,
+  });
+
+  return `${AUTH_COOKIE_KEY}=${token}`;
+}
+
+function jsonRequest(url: string, body: unknown, cookie = signerCookie()) {
   return new NextRequest(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      cookie: operatorCookie(),
+      cookie,
     },
     body: JSON.stringify(body),
   });
