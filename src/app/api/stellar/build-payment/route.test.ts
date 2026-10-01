@@ -161,6 +161,42 @@ beforeEach(async () => {
 });
 
 describe("POST /api/stellar/build-payment quote verification", () => {
+  it("rejects operator-only wallets", async () => {
+    const response = await buildPaymentPost(jsonRequest(
+      "http://localhost/api/stellar/build-payment",
+      authorizedBuildBody(),
+      operatorCookie(),
+    ));
+
+    expect(response.status).toBe(403);
+  });
+
+  it.each(["0", "-1", "NaN", "Infinity", "9007199254740992", "10.12345678"] as const)(
+    "rejects invalid amount %s before XDR construction",
+    async (amount) => {
+      const buildRes = await buildPaymentPost(
+        jsonRequest(
+          "http://localhost/api/stellar/build-payment",
+          authorizedBuildBody({
+            auditEntryId: "00000000-0000-4000-8000-000000000000",
+            amountXLM: amount,
+          }),
+        ),
+      );
+
+      expect(buildRes.status).toBe(400);
+      const payload = (await buildRes.json()) as {
+        error: string;
+        details?: { fieldErrors?: { amountXLM?: string[] } };
+      };
+      expect(payload.error).toBe("Invalid payment build request.");
+      expect(payload.details?.fieldErrors?.amountXLM).toContain(
+        "amountXLM must be a positive finite XLM amount with up to 7 decimals.",
+      );
+      expect(horizonMocks.loadAccount).not.toHaveBeenCalled();
+    },
+  );
+
   it("builds XDR when request matches the authorized payment quote", async () => {
     await authorizePaymentDecision();
 

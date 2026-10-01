@@ -26,7 +26,12 @@ import {
   maybeRunCleanup,
 } from "@/lib/storage/submit-idempotency-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
-import { stellarSubmitSignedRequestSchema } from "@/lib/validation/schemas";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
+import {
+  stellarSubmitSignedRequestSchema,
+  validateIdempotencyKey,
+} from "@/lib/validation/schemas";
+import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 import { normalizeHorizonError } from "@/lib/utils/horizonErrors";
 import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 
@@ -239,6 +244,41 @@ export async function POST(request: NextRequest) {
     }
 
     const payload = parsedPayload.data;
+
+    if (!xdrSourceResult.payment) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction does not contain one authorized native payment." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const auditEntry = await getAuditEntryById(userId, payload.auditEntryId);
+    if (!auditEntry?.paymentQuote || xdrSourceResult.payment.memo !== auditEntry.paymentQuote.memo) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: 403,
+        body: { error: "Signed transaction memo does not match the authorized payment quote." },
+        headers: rateLimitHeaders(rate),
+      });
+    }
+
+    const authorization = verifyPaymentAgainstQuote(auditEntry, {
+      ...xdrSourceResult.payment,
+      network: "testnet",
+    });
+    if (!authorization.ok) {
+      return jsonWithRequestContext(request, {
+        route: "/api/stellar/submit-signed",
+        startedAtMs,
+        status: authorization.status,
+        body: { error: authorization.error, field: authorization.field },
+        headers: rateLimitHeaders(rate),
+      });
+    }
 
     if (!xdrSourceResult.payment) {
       return jsonWithRequestContext(request, {

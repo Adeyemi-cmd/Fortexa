@@ -142,6 +142,24 @@ describe("/api/decision route", () => {
     });
   });
 
+  it("rejects decisions after the session wallet mapping is revoked", async () => {
+    vi.mocked(getUserWallet).mockResolvedValueOnce(null);
+    const request = new NextRequest("http://localhost/api/decision", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: operatorCookie(),
+      },
+      body: JSON.stringify({ scenarioId: "safe-research-payment" }),
+    });
+
+    const response = await POST(request);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({
+      error: "No active wallet mapping found for this user.",
+    });
+  });
+
   it("evaluates scenario for operator", async () => {
     const request = new NextRequest("http://localhost/api/decision", {
       method: "POST",

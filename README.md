@@ -185,8 +185,6 @@ The policy decision authorizes a fixed payment quote (destination, amount, asset
 
 Client-side UI must pass the same `paymentQuoteInput` at decision time and reuse the returned `auditEntry.id` both when building XDR and submitting it. Mutating any authorized field after approval cannot produce an executable transaction.
 
-**Signed-envelope verification (issue #206):** `src/lib/stellar/verify-payment-quote.ts` also exposes `verifySignedPaymentAgainstQuote(auditEntry, signedXdr)`. It decodes the signed envelope in-process (no Horizon call), requires exactly one payment operation, rejects any other or extra operation bundled into the transaction, and compares asset, destination, memo type, memo value, and amount against the stored quote as exact integer stroops — a one-stroop difference fails. The quote's freshness is checked with the shared request-timestamp skew helper, so an expired quote fails before submit.
-
 **Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Results are stored per authenticated user + key + signed-XDR hash. Replaying the same key with the same signed XDR returns the original result (`200`, with header `Idempotency-Replayed: true`) without resubmitting to Horizon. Reusing the same key with a different signed XDR returns `409 Conflict`. Omitting the key preserves the original submit-on-every-request behavior. Keys must be 8–255 characters.
 
 Additional behavior:

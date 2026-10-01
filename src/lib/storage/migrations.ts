@@ -80,32 +80,7 @@ export const STORAGE_MIGRATIONS: SqlMigration[] = [
     `,
   },
   {
-    id: "005_submit_idempotency_claims",
-    sql: `
-      ALTER TABLE fortexa_submit_idempotency
-        ADD COLUMN IF NOT EXISTS request_hash TEXT,
-        ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'settled',
-        ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS status_code INTEGER,
-        ADD COLUMN IF NOT EXISTS transaction_id TEXT,
-        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-
-      -- Pre-claim rows only carried a signed-XDR hash. Carry it forward so the
-      -- column is populated and comparable; such rows replay as a conflict
-      -- because identity can no longer be proven from the stored hash alone.
-      UPDATE fortexa_submit_idempotency
-        SET request_hash = xdr_hash
-        WHERE request_hash IS NULL;
-
-      ALTER TABLE fortexa_submit_idempotency
-        ALTER COLUMN request_hash SET NOT NULL;
-
-      CREATE INDEX IF NOT EXISTS fortexa_submit_idempotency_created_at_idx
-        ON fortexa_submit_idempotency (created_at);
-    `,
-  },
-  {
-    id: "006_audit_chain_sequence",
+    id: "005_audit_chain_sequence",
     sql: `
       ALTER TABLE fortexa_audit_entries
         ADD COLUMN IF NOT EXISTS chain_sequence BIGINT;

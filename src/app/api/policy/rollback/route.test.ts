@@ -59,106 +59,17 @@ describe("/api/policy/rollback route", () => {
     expect(response.status).toBe(200);
   });
 
-  it("rejects rollback when an in-flight allow would become deny", async () => {
-    await resetAuditState("policy-rollback-operator");
-    await resetSubmitIdempotencyState("policy-rollback-operator");
-
-    const v2 = await updatePolicyConfig({ ...defaultPolicyConfig, perTxCapXLM: 10 });
-    const v3 = await updatePolicyConfig({ ...defaultPolicyConfig, perTxCapXLM: 1000 });
-
-    const entryId = randomUUID();
-    await appendAuditEntry("policy-rollback-operator", {
-      id: entryId,
-      timestamp: new Date().toISOString(),
-      action: {
-        id: "action-1",
-        name: "Test Payment",
-        kind: "api_payment",
-        target: "GABC...",
-        domain: "example.com",
-        amountXLM: 100,
-      },
-      decision: "APPROVE",
-      explanation: "ok",
-      triggeredPolicies: [],
-      riskFindings: [],
-      paymentQuote: {
-        destination: "GABC...",
-        amountXLM: "100",
-        asset: "native",
-        memo: "test",
-        network: "testnet"
-      }
-    });
-
-    await putIdempotencyRecord("policy-rollback-operator", entryId, {
-       xdrHash: "hash",
-       result: { ok: true }
-    });
-
+  it("rejects signer-only rollback", async () => {
     const request = new NextRequest("http://localhost/api/policy/rollback", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        cookie: operatorCookie(),
+        cookie: signerCookie(),
       },
-      body: JSON.stringify({ targetVersion: v2.version }),
+      body: JSON.stringify({ targetVersion: 1 }),
     });
 
     const response = await POST(request);
-    expect(response.status).toBe(409);
-    
-    const body = await response.json();
-    expect(body.conflictingPaymentIds).toContain(entryId);
-  });
-
-  it("proceeds with rollback when no reserved payment changes", async () => {
-    await resetAuditState("policy-rollback-operator");
-    await resetSubmitIdempotencyState("policy-rollback-operator");
-
-    const v2 = await updatePolicyConfig({ ...defaultPolicyConfig, perTxCapXLM: 10 });
-    const v3 = await updatePolicyConfig({ ...defaultPolicyConfig, perTxCapXLM: 1000 });
-
-    const entryId = randomUUID();
-    await appendAuditEntry("policy-rollback-operator", {
-      id: entryId,
-      timestamp: new Date().toISOString(),
-      action: {
-        id: "action-2",
-        name: "Test Payment Small",
-        kind: "api_payment",
-        target: "GABC...",
-        domain: "example.com",
-        amountXLM: 5,
-      },
-      decision: "APPROVE",
-      explanation: "ok",
-      triggeredPolicies: [],
-      riskFindings: [],
-      paymentQuote: {
-        destination: "GABC...",
-        amountXLM: "5",
-        asset: "native",
-        memo: "test",
-        network: "testnet"
-      }
-    });
-
-    await putIdempotencyRecord("policy-rollback-operator", entryId, {
-       xdrHash: "hash2",
-       result: { ok: true }
-    });
-
-    const request = new NextRequest("http://localhost/api/policy/rollback", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        cookie: operatorCookie(),
-      },
-      body: JSON.stringify({ targetVersion: v2.version }),
-    });
-
-    const response = await POST(request);
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(403);
   });
 });

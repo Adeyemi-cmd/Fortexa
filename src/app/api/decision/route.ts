@@ -96,17 +96,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    if (!(await canPassDecisionGate(userId))) {
-      logWarn("Decision route rejected revoked wallet", { ...context, userId });
-      return jsonWithRequestContext(request, {
-        route: "/api/decision",
-        startedAtMs,
-        status: 401,
-        body: { error: "Wallet access has been revoked." },
-        headers: rateLimitHeaders(rate),
-      });
-    }
-
     const parsedBody = decisionRequestSchema.safeParse(rawBody);
 
     if (!parsedBody.success) {

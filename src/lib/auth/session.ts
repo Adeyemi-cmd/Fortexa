@@ -107,6 +107,10 @@ export function verifySessionToken(token: string, options?: VerifySessionTokenOp
       return null;
     }
 
+    if (parsed.roles !== undefined && (!Array.isArray(parsed.roles) || parsed.roles.some((role) => role !== "operator" && role !== "signer" && role !== "viewer"))) {
+      return null;
+    }
+
     const session: AuthSession = {
       userId: parsed.userId,
       email: parsed.email,

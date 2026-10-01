@@ -57,7 +57,16 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
-import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+vi.mock("@/lib/storage/audit-store", () => ({
+  getAuditEntryById: horizonMocks.getAuditEntry,
+}));
+
+vi.mock("@/lib/stellar/verify-payment-quote", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/verify-payment-quote")>(),
+  verifyPaymentAgainstQuote: horizonMocks.verifyQuote,
+}));
+
+import { Account, Asset, Keypair, Memo, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as submitSignedPost } from "@/app/api/stellar/submit-signed/route";
@@ -119,6 +128,7 @@ function buildSignedXdr(amount: string, destination?: string) {
         amount,
       })
     )
+    .addMemo(Memo.text("fortexa:idempotency-test"))
     .setTimeout(30)
     .build();
   tx.sign(source);
@@ -129,29 +139,11 @@ function slowSuccess(delayMs: number, hash = mockTxHash) {
   return new Promise((resolve) => {
     setTimeout(() => resolve(horizonAccepted(hash)), delayMs);
   });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
   horizonMocks.getAuditEntry.mockResolvedValue({
     id: "00000000-0000-4000-8000-000000000000",
     paymentQuote: { memo: "fortexa:idempotency-test" },
   });
   horizonMocks.verifyQuote.mockReturnValue({ ok: true, quote: {} });
-
-  return { promise, resolve, reject };
-}
-
-beforeEach(async () => {
-  await resetRateLimitStore();
-  horizonMocks.submitTransaction.mockReset();
-  horizonMocks.submitTransaction.mockResolvedValue(horizonAccepted());
-  storeMocks.failComplete = false;
 
   await resetSubmitIdempotencyState(OPERATOR_USER_ID);
 });
