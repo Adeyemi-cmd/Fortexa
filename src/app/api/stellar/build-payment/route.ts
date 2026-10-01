@@ -10,24 +10,36 @@ import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
 
 export async function POST(request: NextRequest) {
-  const rate = await consumeRateLimit(request, {
-    key: "stellar-build-payment",
+  // Read the body first so the gate can blocklist-check the destination in
+  // the same atomic step as the rate-limit consumption (issue #202).
+  const bodyResult = await readJsonBody(request);
+
+  let gateDestination: string | undefined;
+  if (bodyResult.ok) {
+    const preview = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
+    gateDestination = preview.success ? preview.data.destination : undefined;
+  }
+
+  const gate = await enforceRequestGate(request, {
+    rateLimitKey: "stellar-build-payment",
     limit: 30,
     windowMs: 60_000,
+    destination: gateDestination,
   });
 
-  if (!rate.ok) {
+  if (!gate.ok) {
     return NextResponse.json(
       { error: "Rate limit exceeded for payment build endpoint." },
       { status: 429, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );
   }
 
+  const rate = gate.rate;
+
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       return auth.response;
@@ -56,7 +68,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const bodyResult = await readJsonBody(request);
     if (!bodyResult.ok) {
       return NextResponse.json(
         { error: bodyResult.error },
@@ -67,11 +78,10 @@ export async function POST(request: NextRequest) {
     const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(bodyResult.data);
 
     if (!parsedPayload.success) {
-      logValidationFailure("Stellar build payment validation failed", { route: "/api/stellar/build-payment", userId }, parsedPayload.error, bodyResult.data);
       return NextResponse.json(
         {
           error: "Invalid payment build request.",
-          details: toPublicValidationDetails(parsedPayload.error),
+          details: parsedPayload.error.flatten(),
         },
         { status: 400, headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
       );
@@ -98,7 +108,6 @@ export async function POST(request: NextRequest) {
       asset: payload.asset,
       memo: payload.memo,
       network: payload.network,
-      requestTimestampMs: payload.requestTimestampMs,
     });
 
     if (!verification.ok) {

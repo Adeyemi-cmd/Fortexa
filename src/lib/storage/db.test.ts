@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { queryMock, endMock, poolCtorMock } = vi.hoisted(() => {
+const { queryMock, endMock, poolCtorMock, releaseMock } = vi.hoisted(() => {
   const query = vi.fn();
   const end = vi.fn().mockResolvedValue(undefined);
+  const release = vi.fn();
+  const connect = vi.fn(async () => ({ query, release }));
   const ctor = vi.fn(function MockPool() {
     return {
       query,
       end,
+      connect,
     };
   });
 
@@ -14,6 +17,7 @@ const { queryMock, endMock, poolCtorMock } = vi.hoisted(() => {
     queryMock: query,
     endMock: end,
     poolCtorMock: ctor,
+    releaseMock: release,
   };
 });
 

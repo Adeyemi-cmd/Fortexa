@@ -4,7 +4,7 @@ import { getSessionFromRequest } from "@/lib/auth/session";
 import { securityHeadersForRequest } from "@/lib/security/headers";
 
 export async function GET(request: NextRequest) {
-  const session = getSessionFromRequest(request);
+  const session = await getActiveSessionFromRequest(request);
 
   if (!session) {
     return NextResponse.json(

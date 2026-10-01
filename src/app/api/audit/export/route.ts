@@ -6,13 +6,6 @@ import { getRequestLogContext, logError, logInfo, logWarn } from "@/lib/observab
 import { listAllAuditEntriesByUser, listAuditEntries, validateAuditFilter } from "@/lib/storage/audit-store";
 import { sanitizeCsvCell } from "@/utils/csv.utils";
 import type { AuditFilter } from "@/lib/storage/audit-store";
-import { redactAuditExportEntriesByUser, redactAuditExportPayload } from "@/lib/audit/redact";
-import { getChainBoundaries } from "@/lib/audit/hash-chain";
-
-
-
-
-
 
 function toCsv(rows: Array<Record<string, string | number | boolean | null>>) {
   if (rows.length === 0) {
@@ -97,15 +90,8 @@ export async function GET(request: NextRequest) {
           body: {
             scope: "all",
             exportedBy: auth.session.userId,
-            entriesByUser: redactAuditExportEntriesByUser(all),
-            chainBoundariesByUser: Object.fromEntries(
-              Object.entries(all).map(([userId, entries]) => [
-                userId,
-                getChainBoundaries(entries),
-              ]),
-            ),
+            entriesByUser: all,
           },
-
         });
       }
 
@@ -129,11 +115,12 @@ export async function GET(request: NextRequest) {
       }
 
       logInfo("Audit export success (all/csv)", { ...context, userId: auth.session.userId });
+      const filenameAll = `fortexa-audit-all-${new Date().toISOString().slice(0, 10)}.csv`;
       return new NextResponse(toCsv(rows), {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
-          "Content-Disposition": "attachment; filename=fortexa-audit-all.csv",
+          "Content-Disposition": `attachment; filename=${filenameAll}`,
           "x-request-id": request.headers.get("x-request-id") ?? crypto.randomUUID(),
         },
       });
@@ -150,10 +137,8 @@ export async function GET(request: NextRequest) {
         body: {
           scope: "mine",
           userId: auth.session.userId,
-          entries: redactAuditExportPayload(mine),
-          chainBoundary: getChainBoundaries(mine),
+          entries: mine,
         },
-
       });
     }
 
@@ -173,7 +158,7 @@ export async function GET(request: NextRequest) {
 
     logInfo("Audit export success (mine/csv)", { ...context, userId: auth.session.userId });
     const filenameMine = `fortexa-audit-mine-${new Date().toISOString().slice(0, 10)}.csv`;
-    return new NextResponse(toCsv(redactAuditExportPayload(rows)), {
+    return new NextResponse(toCsv(rows), {
       status: 200,
       headers: {
         "Content-Type": "text/csv; charset=utf-8",

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireAuth } from "@/lib/auth/require-auth";
+import { isLoginAuthorizationPayload } from "@/lib/auth/wallet-challenge";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { securityHeadersForRequest } from "@/lib/security/headers";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const auth = requireAuth(request, { allowedRoles: ["operator"] });
+    const auth = requireAuth(request, { allowedRoles: ["signer"] });
 
     if (!auth.ok) {
       return auth.response;
@@ -30,6 +31,13 @@ export async function POST(request: NextRequest) {
     const userId = auth.session.userId;
 
     const rawPayload = (await request.json().catch(() => ({}))) as unknown;
+    if (isLoginAuthorizationPayload(rawPayload)) {
+      return NextResponse.json(
+        { error: "Login signatures cannot authorize a payment." },
+        { status: 400, headers: rateLimitHeaders(rate) },
+      );
+    }
+
     const parsedPayload = stellarBuildPaymentRequestSchema.safeParse(rawPayload);
 
     if (!parsedPayload.success) {

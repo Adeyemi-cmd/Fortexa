@@ -107,8 +107,10 @@ describe("/api/auth/login challenge-signature flow", () => {
     );
 
     expect(second.status).toBe(400);
-    const payload = (await second.json()) as { error: string };
+    const payload = (await second.json()) as { error: string; code: string };
     expect(payload.error).toContain("already used");
+    expect(payload.code).toBe("replayed");
+    expect(JSON.stringify(payload)).not.toContain(signature);
   });
 
   it("rejects expired challenges", async () => {
@@ -135,8 +137,9 @@ describe("/api/auth/login challenge-signature flow", () => {
     );
 
     expect(response.status).toBe(400);
-    const payload = (await response.json()) as { error: string };
+    const payload = (await response.json()) as { error: string; code: string };
     expect(payload.error).toContain("expired");
+    expect(payload.code).toBe("expired");
   });
 
   it("rejects unauthorized wallets after signature verification", async () => {

@@ -10,6 +10,14 @@ export async function POST(request: NextRequest) {
     return auth.response;
   }
 
+  if (getStellarNetworkPassphrase() === STELLAR_PUBLIC_NETWORK_PASSPHRASE) {
+    logWarn("Stellar funding refused on public network", getRequestLogContext(request, "/api/stellar/fund"));
+    return NextResponse.json(
+      { error: "Stellar funding is disabled on the public network." },
+      { status: 403 }
+    );
+  }
+
   return NextResponse.json(
     { error: "Friendbot funding has been removed from this project." },
     { status: 410, headers: securityHeadersForRequest(request) }

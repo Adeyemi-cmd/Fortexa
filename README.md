@@ -107,6 +107,22 @@ Challenge TTL: `FORTEXA_AUTH_CHALLENGE_TTL_SECONDS` (default `300`).
 - Rate limiting
 - Brute-force lockout (`FORTEXA_AUTH_MAX_ATTEMPTS`, `FORTEXA_AUTH_LOCK_MINUTES`)
 
+### 4.4 Shared Enforcement Gate (decision / build / submit)
+
+`POST /api/decision`, `POST /api/stellar/build-payment`, and `POST /api/stellar/submit-signed` share one enforcement gate (`src/lib/security/enforcement-gate.ts`) that runs before any side effect:
+
+1. **Rate limit** — the caller's per-route budget is consumed atomically through the shared security state (Redis `EVAL` when `REDIS_URL` is set, file-backed otherwise), so parallel requests cannot both pass the last allowed slot.
+2. **Blocklist** — the payment destination (and, on decision, the action domain) is checked against the `FORTEXA_BLOCKLIST_URL` feed. A destination blocked on one route is blocked on all three.
+
+Denied requests return a stable machine-readable `code` alongside the usual rate-limit headers:
+
+| Condition | HTTP | `code` |
+|---|---|---|
+| Destination or domain on the blocklist | `403` | `BLOCKLISTED` |
+| Route rate budget exhausted | `429` | `RATE_LIMITED` |
+
+Destination and domain values never appear in metrics labels.
+
 > Note: MFA is removed from current implementation.
 
 ---
@@ -149,11 +165,11 @@ Simulation is strictly read-only: it never saves the policy and never consumes u
 ### 6.2 Signed XDR Payment Path
 
 1. Evaluate action in `/console` with a **payment quote** (`paymentQuoteInput`: destination, optional memo, network). On `APPROVE`/`WARN`, Fortexa stores an immutable `paymentQuote` on the audit entry.
-2. Build unsigned tx: `POST /api/stellar/build-payment` with `auditEntryId` plus the same destination, amount, asset, memo, and network. The server verifies every field against the authorized quote **before** constructing XDR.
+2. Build unsigned tx as a signer: `POST /api/stellar/build-payment` with `auditEntryId` plus the same destination, amount, asset, memo, and network. The server verifies every field against the authorized quote **before** constructing XDR.
 3. `Submit Signed XDR` orchestrates signing/submission path:
    - if signed input is already present → submit directly
    - if unsigned input is present → wallet signing is triggered first, then submit
-4. Submit signed tx: `POST /api/stellar/submit-signed`.
+4. Submit signed tx as a signer: `POST /api/stellar/submit-signed` with the signed XDR and the same `auditEntryId`. The server checks that the XDR contains one native payment matching the unexpired `APPROVE`/`WARN` quote before broadcasting.
 5. Explorer URL is returned and shown as clickable link.
 
 #### Quote-to-XDR trust boundary
@@ -167,7 +183,9 @@ The policy decision authorizes a fixed payment quote (destination, amount, asset
 | Tampered destination, amount, asset, or memo | `403` | `{ error, field }` naming the mismatched field |
 | Valid approved request | `200` | `{ ok: true, xdr, networkPassphrase, … }` |
 
-Client-side UI must pass the same `paymentQuoteInput` at decision time and reuse the returned `auditEntry.id` when building XDR. Mutating any authorized field after approval cannot produce a valid unsigned transaction.
+Client-side UI must pass the same `paymentQuoteInput` at decision time and reuse the returned `auditEntry.id` both when building XDR and submitting it. Mutating any authorized field after approval cannot produce an executable transaction.
+
+**Signed-envelope verification (issue #206):** `src/lib/stellar/verify-payment-quote.ts` also exposes `verifySignedPaymentAgainstQuote(auditEntry, signedXdr)`. It decodes the signed envelope in-process (no Horizon call), requires exactly one payment operation, rejects any other or extra operation bundled into the transaction, and compares asset, destination, memo type, memo value, and amount against the stored quote as exact integer stroops — a one-stroop difference fails. The quote's freshness is checked with the shared request-timestamp skew helper, so an expired quote fails before submit.
 
 **Idempotent retries:** `POST /api/stellar/submit-signed` accepts an optional idempotency key, supplied either as an `Idempotency-Key` request header or an `idempotencyKey` body field (the header wins if both are present). Results are stored per authenticated user + key + signed-XDR hash. Replaying the same key with the same signed XDR returns the original result (`200`, with header `Idempotency-Replayed: true`) without resubmitting to Horizon. Reusing the same key with a different signed XDR returns `409 Conflict`. Omitting the key preserves the original submit-on-every-request behavior. Keys must be 8–255 characters.
 
@@ -282,6 +300,7 @@ GROQ_MODEL=llama-3.3-70b-versatile
 
 FORTEXA_AUTH_SECRET=
 FORTEXA_OPERATOR_WALLETS=
+FORTEXA_SIGNER_WALLETS=
 FORTEXA_VIEWER_WALLETS=
 FORTEXA_AUTH_MAX_ATTEMPTS=5
 FORTEXA_AUTH_LOCK_MINUTES=10
@@ -505,7 +524,7 @@ or `signedXdr` strings.
 
 ## 13) 📈 Ops / Observability (Appendix)
 
-- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`
+- Health endpoint: `GET /api/health` — returns `blocklist` object with `configured`, `lastRefreshAt`, `domainCount`, `lastError`, plus `ready`, `checks`, and `failingChecks` (`production_config`, `storage`, `horizon`). The dashboard shows its pay, fund, and policy actions only while `ready` is `true`.
 - Metrics endpoint: `GET /api/metrics` + Prometheus format
 - `/ops` dashboard shows:
   - service health
@@ -537,7 +556,7 @@ Otherwise Fortexa falls back to local JSON files:
 - Vercel default: `/tmp/fortexa/*.json`
 
 Optional overrides:
-- `FORTEXA_STORE_DIR` to set file-store directory explicitly
+- `FORTEXA_STORE_DIR` to set file-store directory explicitly (the audit file store only opens paths that resolve inside this directory; `..`, absolute paths outside it, and symlinks leading out of it are refused with a `StoragePathError`)
 - `FORTEXA_SHARED_STATE_PATH` for shared lockout/rate-limit state file path
   - use an absolute path on Vercel (example: `/tmp/fortexa/shared-security-state.json`)
 - `REDIS_URL` for multi-instance deployments (e.g. Vercel)
@@ -625,3 +644,4 @@ Common Stellar Horizon failures during the signed payment flow:
 MIT (see `package.json`).
 
 All done
+...
