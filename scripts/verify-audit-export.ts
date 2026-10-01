@@ -2,34 +2,12 @@ import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { verifyHashChain } from "../src/lib/audit/hash-chain";
-import type { ChainBoundaries, ChainVerificationResult } from "../src/lib/audit/hash-chain";
+import type { ChainVerificationResult } from "../src/lib/audit/hash-chain";
 import type { AuditEntry } from "../src/lib/types/domain";
 
 export interface ExtractedExport {
   entries: AuditEntry[] | null;
   entriesByUser: Record<string, AuditEntry[]> | null;
-  chainBoundary?: ChainBoundaries;
-  chainBoundariesByUser?: Record<string, ChainBoundaries>;
-}
-
-function extractChainBoundaries(value: unknown, label: string): ChainBoundaries | undefined {
-  if (value === undefined) return undefined;
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-
-  const raw = value as Record<string, unknown>;
-  const boundaries: ChainBoundaries = {};
-  for (const key of ["firstEntryHash", "lastEntryHash"] as const) {
-    const hash = raw[key];
-    if (hash !== undefined) {
-      if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)) {
-        throw new Error(`${label}.${key} must be a 64-character lowercase SHA-256 hash`);
-      }
-      boundaries[key] = hash;
-    }
-  }
-  return boundaries;
 }
 
 export function extractExportPayload(data: unknown): ExtractedExport {
@@ -54,26 +32,7 @@ export function extractExportPayload(data: unknown): ExtractedExport {
       }
       result[userId] = entries as AuditEntry[];
     }
-
-    let chainBoundariesByUser: Record<string, ChainBoundaries> | undefined;
-    if (obj.chainBoundariesByUser !== undefined) {
-      if (
-        obj.chainBoundariesByUser === null ||
-        typeof obj.chainBoundariesByUser !== "object" ||
-        Array.isArray(obj.chainBoundariesByUser)
-      ) {
-        throw new Error("chainBoundariesByUser must be an object");
-      }
-      chainBoundariesByUser = {};
-      for (const [userId, boundaries] of Object.entries(
-        obj.chainBoundariesByUser as Record<string, unknown>,
-      )) {
-        chainBoundariesByUser[userId] =
-          extractChainBoundaries(boundaries, `chainBoundariesByUser.${userId}`) ?? {};
-      }
-    }
-
-    return { entries: null, entriesByUser: result, chainBoundariesByUser };
+    return { entries: null, entriesByUser: result };
   }
 
   if (scope === "mine" || obj.entries) {
@@ -81,11 +40,7 @@ export function extractExportPayload(data: unknown): ExtractedExport {
     if (!Array.isArray(entries)) {
       throw new Error("scope=mine export is missing entries array");
     }
-    return {
-      entries: entries as AuditEntry[],
-      entriesByUser: null,
-      chainBoundary: extractChainBoundaries(obj.chainBoundary, "chainBoundary"),
-    };
+    return { entries: entries as AuditEntry[], entriesByUser: null };
   }
 
   throw new Error(
@@ -134,7 +89,7 @@ function main(filePath: string): never {
   }
 
   if (extracted.entries) {
-    const result = verifyHashChain(extracted.entries, extracted.chainBoundary);
+    const result = verifyHashChain(extracted.entries);
     if (result.valid) {
       console.log(`✓ Audit export valid — ${result.checkedCount} entries checked, ${result.legacyCount} legacy`);
       process.exit(0);
@@ -158,10 +113,7 @@ function main(filePath: string): never {
     let anyInvalid = false;
 
     for (const userId of userKeys) {
-      const result = verifyHashChain(
-        extracted.entriesByUser[userId]!,
-        extracted.chainBoundariesByUser?.[userId],
-      );
+      const result = verifyHashChain(extracted.entriesByUser[userId]!);
       results.push({ userId, result });
       if (!result.valid) anyInvalid = true;
     }

@@ -48,6 +48,9 @@ export const defaultPolicyConfig: PolicyConfig = {
     start: 6,
     end: 23,
   },
+  // Example custodial/exchange-style destination that requires a memo.
+  // Compared case-insensitively after trim + uppercase (see decision engine).
+  memoRequiredDestinations: ["GMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"],
 };
 
 export function evaluatePolicy(action: AgentAction, policy: PolicyConfig, usage: DailyUsage): PolicyEvaluation {

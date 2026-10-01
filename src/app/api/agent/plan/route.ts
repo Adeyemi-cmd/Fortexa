@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { generateAgentActionWithGroq } from "@/lib/ai/groq";
-import { PlanError, PLAN_ERROR_MESSAGES } from "@/lib/ai/plan-errors";
+import { filterPlanAgainstLivePolicy } from "@/lib/ai/plan-filter";
+import { PlanError, PLAN_ERRORS, PLAN_ERROR_MESSAGES } from "@/lib/ai/plan-errors";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { logError, logWarn } from "@/lib/observability/logger";
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { agentPlanRequestSchema } from "@/lib/validation/schemas";
-import { logValidationFailure, toPublicValidationDetails } from "@/lib/validation/errors";
+import { toPublicValidationDetails } from "@/lib/validation/errors";
 
 export const runtime = "nodejs";
 
@@ -30,12 +31,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const logContext: Record<string, string | number | boolean | null | undefined> = { route: "/api/agent/plan" };
+
   try {
     const rawBody = (await request.json().catch(() => ({}))) as unknown;
     const parsed = agentPlanRequestSchema.safeParse(rawBody);
 
     if (!parsed.success) {
-      logValidationFailure("Agent plan validation failed", { route: "/api/agent/plan" }, parsed.error, rawBody);
+      // Intentionally do not log the raw request body here: it may embed
+      // secrets or signed XDR from upstream automation, and the zod details
+      // are enough to diagnose the failure.
+      logWarn("Agent plan validation failed", logContext);
+
       return NextResponse.json(
         {
           error: "Invalid request body.",
@@ -45,12 +52,41 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const action = await generateAgentActionWithGroq(parsed.data);
+    const plan = await generateAgentActionWithGroq(parsed.data);
+
+    // The planner is not a decision maker: run the schema-valid plan through
+    // the live decision engine before anything is returned or stored.
+    const outcome = await filterPlanAgainstLivePolicy({
+      items: [plan],
+      userId: auth.session.userId,
+      logContext,
+    });
+
+    if (outcome.allowed.length === 0) {
+      const reason = outcome.dropped[0]?.reason ?? PLAN_ERRORS.ENGINE_DENIED;
+      const message = PLAN_ERROR_MESSAGES[reason];
+
+      logWarn("Agent plan denied", { ...logContext, code: reason });
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: message,
+          code: reason,
+        },
+        { status: 422, headers: rateLimitHeaders(rate) }
+      );
+    }
+
+    const decisionId = outcome.allowed[0].decisionId;
+    const decision = outcome.allowed[0].decision;
 
     return NextResponse.json(
       {
         ok: true,
-        action,
+        action: plan.action,
+        decisionId,
+        decision,
         provider: "groq",
       },
       { headers: rateLimitHeaders(rate) }

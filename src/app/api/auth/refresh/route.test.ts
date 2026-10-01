@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
+import { buildSecurityHeaders } from "@/lib/security/headers";
 import { POST } from "@/app/api/auth/refresh/route";
 
 function operatorCookie() {
@@ -22,6 +23,9 @@ describe("/api/auth/refresh route", () => {
     const response = await POST(request);
 
     expect(response.status).toBe(401);
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
   });
 
   it("returns 200 and rotates for authenticated user", async () => {
@@ -41,5 +45,10 @@ describe("/api/auth/refresh route", () => {
     expect(payload.ok).toBe(true);
     expect(payload.user.userId).toBe("refresh-operator");
     expect(payload.user.role).toBe("operator");
+
+    for (const [key, value] of Object.entries(buildSecurityHeaders())) {
+      expect(response.headers.get(key)).toBe(value);
+    }
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 });
