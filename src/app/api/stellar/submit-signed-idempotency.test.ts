@@ -57,19 +57,15 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
-vi.mock("@/lib/storage/audit-store", () => ({
-  getAuditEntryById: horizonMocks.getAuditEntry,
-}));
+vi.mock("@/lib/storage/audit-store", () => ({ getAuditEntryById: vi.fn() }));
 
-vi.mock("@/lib/stellar/verify-payment-quote", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/stellar/verify-payment-quote")>(),
-  verifyPaymentAgainstQuote: horizonMocks.verifyQuote,
-}));
-
-import { Account, Asset, Keypair, Memo, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 
 import { POST as submitSignedPost } from "@/app/api/stellar/submit-signed/route";
+import { createBuildAuthorization, getTransactionHash } from "@/lib/stellar/payment-build-authorization";
+import { getAuditEntryById } from "@/lib/storage/audit-store";
+import { IDEMPOTENCY_KEY_ERROR } from "@/lib/validation/schemas";
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
 import { resetRateLimitStore } from "@/lib/security/rate-limit";
 import {
@@ -79,7 +75,8 @@ import {
 
 const OPERATOR_USER_ID = "idem-operator-id";
 const mockTxHash = "b".repeat(64);
-const OTHER_TX_HASH = "d".repeat(64);
+const decisionId = "00000000-0000-4000-8000-000000000001";
+const quoteExpiresAt = new Date(Date.now() + 300_000).toISOString();
 
 function horizonAccepted(hash = mockTxHash) {
   return {
@@ -102,6 +99,18 @@ function operatorCookie() {
 }
 
 function submitRequest(body: unknown, extraHeaders: Record<string, string> = {}) {
+  const payload = body as { signedXdr?: string };
+  const authorizedBody = payload.signedXdr ? {
+    ...payload,
+    decisionId,
+    quoteExpiresAt,
+    buildAuthorization: createBuildAuthorization({
+      userId: OPERATOR_USER_ID,
+      decisionId,
+      quoteExpiresAt,
+      transactionHash: getTransactionHash(payload.signedXdr, Networks.TESTNET),
+    }),
+  } : body;
   return new NextRequest("http://localhost/api/stellar/submit-signed", {
     method: "POST",
     headers: {
@@ -109,7 +118,7 @@ function submitRequest(body: unknown, extraHeaders: Record<string, string> = {})
       cookie: operatorCookie(),
       ...extraHeaders,
     },
-    body: JSON.stringify({ auditEntryId: "00000000-0000-4000-8000-000000000000", ...(body as Record<string, unknown>) }),
+    body: JSON.stringify(authorizedBody),
   });
 }
 
@@ -135,9 +144,19 @@ function buildSignedXdr(amount: string, destination?: string) {
   return tx.toXDR();
 }
 
-function slowSuccess(delayMs: number, hash = mockTxHash) {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(horizonAccepted(hash)), delayMs);
+beforeEach(async () => {
+  vi.mocked(getAuditEntryById).mockResolvedValue({
+    id: decisionId,
+    timestamp: new Date().toISOString(),
+    decision: "APPROVE",
+    paymentQuote: { expiresAt: quoteExpiresAt },
+  } as Awaited<ReturnType<typeof getAuditEntryById>>);
+  horizonMocks.submitTransaction.mockReset();
+  horizonMocks.submitTransaction.mockResolvedValue({
+    hash: mockTxHash,
+    ledger: 42,
+    successful: true,
+    result_xdr: "AAAAAAAAAGQAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAA=",
   });
   horizonMocks.getAuditEntry.mockResolvedValue({
     id: "00000000-0000-4000-8000-000000000000",

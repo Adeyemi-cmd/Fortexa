@@ -38,6 +38,18 @@ vi.mock("@stellar/stellar-sdk", async () => {
   };
 });
 
+vi.mock("@/lib/decision/engine", () => ({
+  evaluateDecision: vi.fn(async () => ({
+    decision: "APPROVE",
+    explanation: "Fixture decision",
+    triggeredPolicies: [],
+    riskScore: 0,
+    riskFindings: [],
+    requiresManualApproval: false,
+    analyzerStatus: { isDegraded: false },
+  })),
+}));
+
 import { Account } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
 

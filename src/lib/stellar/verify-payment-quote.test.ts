@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   buildPaymentQuoteFromDecision,
+  isPaymentDecisionCurrent,
   normalizeAmountXLM,
   verifyPaymentAgainstQuote,
   verifySignedPaymentAgainstQuote,
@@ -18,6 +19,13 @@ import {
 import type { AuditEntry } from "@/lib/types/domain";
 
 function mockAuditEntry(overrides: Partial<AuditEntry> = {}): AuditEntry {
+  const quote = buildPaymentQuoteFromDecision({
+    destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    amountXLM: 10,
+    actionId: "act-1",
+  });
+  // Older entries have no fixed expiry and use their audit timestamp.
+  if (overrides.timestamp && !overrides.paymentQuote) delete quote.expiresAt;
   return {
     id: "audit-1",
     timestamp: new Date().toISOString(),
@@ -33,11 +41,7 @@ function mockAuditEntry(overrides: Partial<AuditEntry> = {}): AuditEntry {
     explanation: "Approved",
     triggeredPolicies: [],
     riskFindings: [],
-    paymentQuote: buildPaymentQuoteFromDecision({
-      destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-      amountXLM: 10,
-      actionId: "act-1",
-    }),
+    paymentQuote: quote,
     ...overrides,
   };
 }
@@ -54,6 +58,22 @@ describe("verifyPaymentAgainstQuote", () => {
     });
 
     expect(result.ok).toBe(true);
+  });
+
+  it("uses the injected clock and fixed expiry at submit", () => {
+    const nowMs = Date.parse("2026-09-30T12:00:00.000Z");
+    const entry = mockAuditEntry({
+      paymentQuote: buildPaymentQuoteFromDecision({
+        destination: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        amountXLM: 10,
+        actionId: "act-1",
+        nowMs,
+      }),
+    });
+    const expiresAt = entry.paymentQuote!.expiresAt!;
+    expect(isPaymentDecisionCurrent(entry, entry.id, expiresAt, Date.parse(expiresAt) - 1)).toBe(true);
+    expect(isPaymentDecisionCurrent(entry, entry.id, expiresAt, Date.parse(expiresAt))).toBe(false);
+    expect(isPaymentDecisionCurrent(entry, "different-decision", expiresAt, nowMs)).toBe(false);
   });
 
   it("rejects blocked decisions", () => {

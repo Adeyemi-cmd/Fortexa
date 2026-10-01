@@ -6,7 +6,8 @@ import { getProtectedPaymentFlowReadinessReport } from "@/lib/readiness/producti
 import { consumeRateLimit, rateLimitHeaders } from "@/lib/security/rate-limit";
 import { securityHeadersForRequest } from "@/lib/security/headers";
 import { buildUnsignedPaymentTransaction } from "@/lib/stellar/client";
-import { verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
+import { createBuildAuthorization, getTransactionHash } from "@/lib/stellar/payment-build-authorization";
+import { getQuoteExpiresAt, verifyPaymentAgainstQuote } from "@/lib/stellar/verify-payment-quote";
 import { getAuditEntryById } from "@/lib/storage/audit-store";
 import { getUserWallet } from "@/lib/storage/user-wallet-store";
 import { stellarBuildPaymentRequestSchema } from "@/lib/validation/schemas";
@@ -129,6 +130,14 @@ export async function POST(request: NextRequest) {
       sourcePublicKey,
     );
 
+    const quoteExpiresAt = getQuoteExpiresAt(auditEntry!);
+    const buildAuthorization = createBuildAuthorization({
+      userId,
+      decisionId: auditEntry!.id,
+      quoteExpiresAt,
+      transactionHash: getTransactionHash(unsigned.xdr, unsigned.networkPassphrase),
+    });
+
     return NextResponse.json(
       {
         ok: true,
@@ -138,6 +147,9 @@ export async function POST(request: NextRequest) {
         sourcePublicKey,
         xdr: unsigned.xdr,
         networkPassphrase: unsigned.networkPassphrase,
+        decisionId: auditEntry!.id,
+        quoteExpiresAt,
+        buildAuthorization,
       },
       { headers: { ...rateLimitHeaders(rate), ...securityHeadersForRequest(request) } },
     );

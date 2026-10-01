@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
   const tmpDir = `/tmp/fortexa-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -40,6 +40,19 @@ vi.mock("@stellar/stellar-sdk", async () => {
     },
   };
 });
+
+// Keep this fixture focused on the API handoff; the analyzer has separate tests.
+vi.mock("@/lib/decision/engine", () => ({
+  evaluateDecision: vi.fn(async (action: { amountXLM: number }) => ({
+    decision: action.amountXLM === 95 ? "WARN" : "APPROVE",
+    explanation: "Fixture decision",
+    triggeredPolicies: [],
+    riskScore: 0,
+    riskFindings: [],
+    requiresManualApproval: false,
+    analyzerStatus: { isDegraded: false },
+  })),
+}));
 
 import { Account, Keypair, Networks, TransactionBuilder } from "@stellar/stellar-sdk";
 import { NextRequest } from "next/server";
@@ -126,7 +139,16 @@ beforeEach(async () => {
   await resetAuditState(OPERATOR_USER_ID);
 });
 
-async function runOperatorFlow(decisionBody: Record<string, unknown>, paymentAmount: string) {
+afterEach(() => {
+  vi.useRealTimers();
+  delete process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS;
+});
+
+async function runOperatorFlow(
+  decisionBody: Record<string, unknown>,
+  paymentAmount: string,
+  options: { beforeSubmit?: () => void | string | Promise<void | string>; decisionId?: string; expectedStatus?: number } = {},
+) {
   const decisionRes = await decisionPost(
     jsonRequest("http://localhost/api/decision", {
       ...decisionBody,
@@ -141,7 +163,7 @@ async function runOperatorFlow(decisionBody: Record<string, unknown>, paymentAmo
 
   const decisionPayload = (await decisionRes.json()) as {
     result: { decision: string; riskScore: number };
-    auditEntry: { id: string; decision: string };
+    auditEntry: { id: string; decision: string; paymentQuote: { expiresAt: string } };
     userId: string;
   };
 
@@ -162,22 +184,29 @@ async function runOperatorFlow(decisionBody: Record<string, unknown>, paymentAmo
     xdr: string;
     networkPassphrase: string;
     sourcePublicKey: string;
+    decisionId: string;
+    quoteExpiresAt: string;
+    buildAuthorization: string;
   };
 
   const unsignedTx = TransactionBuilder.fromXDR(buildPayload.xdr, buildPayload.networkPassphrase);
   unsignedTx.sign(sourceKeypair);
   const signedXdr = unsignedTx.toXDR();
 
+  const replacementDecisionId = await options.beforeSubmit?.();
   const submitRes = await submitSignedPost(
     jsonRequest("http://localhost/api/stellar/submit-signed", {
       signedXdr,
-      auditEntryId: decisionPayload.auditEntry.id,
+      decisionId: options.decisionId ?? replacementDecisionId ?? buildPayload.decisionId,
+      quoteExpiresAt: buildPayload.quoteExpiresAt,
+      buildAuthorization: buildPayload.buildAuthorization,
     })
   );
-  expect(submitRes.status).toBe(200);
+  expect(submitRes.status).toBe(options.expectedStatus ?? 200);
 
   const submitPayload = (await submitRes.json()) as {
     ok: boolean;
+    error?: string;
     explorerUrl: string;
     payment: { hash: string; ledger: number; status: string };
   };
@@ -201,6 +230,8 @@ describe("E2E: decision → build XDR → submit (Horizon mocked)", () => {
     expect(auditEntries[0].id).toBe(decisionPayload.auditEntry.id);
 
     expect(buildPayload.ok).toBe(true);
+    expect(buildPayload.decisionId).toBe(decisionPayload.auditEntry.id);
+    expect(buildPayload.quoteExpiresAt).toBe(decisionPayload.auditEntry.paymentQuote.expiresAt);
     expect(buildPayload.networkPassphrase).toBe(Networks.TESTNET);
     expect(buildPayload.sourcePublicKey).toBe(sourceKeypair.publicKey());
     expect(typeof buildPayload.xdr).toBe("string");
@@ -249,5 +280,45 @@ describe("E2E: decision → build XDR → submit (Horizon mocked)", () => {
 
     expect(horizonMocks.loadAccount).toHaveBeenCalled();
     expect(horizonMocks.submitTransaction).toHaveBeenCalled();
+  });
+
+  it("rejects a quote that expires while the wallet is signing", async () => {
+    process.env.FORTEXA_PAYMENT_QUOTE_TTL_SECONDS = "1";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T12:00:00.000Z"));
+    const { submitPayload } = await runOperatorFlow(
+      { scenarioId: "safe-research-payment" },
+      "18.0000000",
+      { beforeSubmit: () => { vi.setSystemTime(new Date("2026-09-30T12:00:01.000Z")); }, expectedStatus: 403 },
+    );
+    expect(submitPayload.error).toMatch(/quote|decision/i);
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
+  });
+
+  it("rejects a swapped decision id for the signed build", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T12:00:00.000Z"));
+    const { submitPayload } = await runOperatorFlow(
+      { scenarioId: "safe-research-payment" },
+      "18.0000000",
+      {
+        beforeSubmit: async () => {
+          const secondDecision = await decisionPost(jsonRequest("http://localhost/api/decision", {
+            scenarioId: "safe-research-payment",
+            paymentQuoteInput: {
+              destination: destinationKeypair.publicKey(),
+              memo: "e2e-test",
+              network: "testnet",
+            },
+          }));
+          expect(secondDecision.status).toBe(200);
+          const payload = (await secondDecision.json()) as { auditEntry: { id: string } };
+          return payload.auditEntry.id;
+        },
+        expectedStatus: 403,
+      },
+    );
+    expect(submitPayload.error).toMatch(/authorized payment build/i);
+    expect(horizonMocks.submitTransaction).not.toHaveBeenCalled();
   });
 });

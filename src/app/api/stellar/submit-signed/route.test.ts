@@ -60,12 +60,14 @@ vi.mock("@/lib/storage/user-wallet-store", () => ({
   getUserWallet: vi.fn(),
 }));
 
-vi.mock("@/lib/storage/audit-store", () => ({
-  getAuditEntryById: getAuditEntryMock,
+vi.mock("@/lib/storage/audit-store", () => ({ getAuditEntryById: vi.fn(async () => ({ id: "decision-1" })) }));
+vi.mock("@/lib/stellar/verify-payment-quote", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/verify-payment-quote")>(),
+  isPaymentDecisionCurrent: vi.fn(() => true),
 }));
-
-vi.mock("@/lib/stellar/verify-payment-quote", () => ({
-  verifyPaymentAgainstQuote: verifyQuoteMock,
+vi.mock("@/lib/stellar/payment-build-authorization", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/stellar/payment-build-authorization")>(),
+  verifyBuildAuthorization: vi.fn(() => true),
 }));
 
 vi.mock("@/lib/validation/schemas", () => ({

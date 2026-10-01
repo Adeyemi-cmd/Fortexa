@@ -165,9 +165,10 @@ export async function POST(request: NextRequest) {
       await consumeUsage(userId, action.amountXLM);
     }
 
+    const decisionNowMs = Date.now();
     const auditEntry: AuditEntry = {
       id: randomUUID(),
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(decisionNowMs).toISOString(),
       action,
       decision: finalDecision,
       explanation,
@@ -177,18 +178,18 @@ export async function POST(request: NextRequest) {
       riskFindings: decision.riskFindings.map(
         (finding) => `${finding.code}: ${finding.detail}`,
       ),
-      ...(finalDecision === "APPROVE" || finalDecision === "WARN"
-        ? body.paymentQuoteInput
-          ? {
-              paymentQuote: buildPaymentQuoteFromDecision({
-                destination: body.paymentQuoteInput.destination,
-                amountXLM: action.amountXLM,
-                memo: body.paymentQuoteInput.memo,
-                actionId: action.id,
-                network: body.paymentQuoteInput.network,
-              }),
-            }
-          : {}
+      ...((finalDecision === "APPROVE" || finalDecision === "WARN") &&
+      (body.paymentQuote || body.paymentQuoteInput)
+        ? {
+            paymentQuote: buildPaymentQuoteFromDecision({
+              destination: (body.paymentQuote || body.paymentQuoteInput)!.destination,
+              amountXLM: action.amountXLM,
+              memo: (body.paymentQuote || body.paymentQuoteInput)!.memo,
+              actionId: action.id,
+              network: (body.paymentQuote || body.paymentQuoteInput)!.network,
+              nowMs: decisionNowMs,
+            }),
+          }
         : {}),
     };
 
