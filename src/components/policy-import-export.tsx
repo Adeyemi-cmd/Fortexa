@@ -7,13 +7,16 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import type { PolicyConfig } from "@/lib/types/domain";
-import { exportPolicyDocument, parsePolicyImport, policyImportMatchesActive, type PolicyExport } from "@/lib/policy/import-export";
+import { policyConfigSchema } from "@/lib/validation/schemas";
 import { generatePolicyDiff, groupDiffChanges } from "@/lib/validation/diff";
+import {
+  migratePolicyDocument,
+  PolicyMigrationError,
+} from "@/lib/policy/migrations";
 
 interface PolicyImportExportProps {
   currentPolicy: PolicyConfig | null;
-  currentVersion: number | null;
-  onImportApproved: (document: PolicyExport) => Promise<void>;
+  onImportApproved: (policy: PolicyConfig) => Promise<void>;
   isOperator: boolean;
   isLoading: boolean;
 }
@@ -22,11 +25,10 @@ type ImportState =
   | { status: "idle" }
   | { status: "validating"; content: string }
   | { status: "error"; error: string }
-  | { status: "diff_preview"; document: PolicyExport; activePolicy: PolicyConfig };
+  | { status: "diff_preview"; policy: PolicyConfig; jsonContent: string };
 
 export function PolicyImportExport({
   currentPolicy,
-  currentVersion,
   onImportApproved,
   isOperator,
   isLoading,
@@ -36,34 +38,23 @@ export function PolicyImportExport({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   /**
-   * Export the active policy as JSON
+   * Export the current policy as JSON
    */
-  async function loadActivePolicy(): Promise<{ policy: PolicyConfig; version: number }> {
-    const response = await fetch("/api/policy", { cache: "no-store" });
-    if (!response.ok) throw new Error("Failed to load the active policy.");
-    const active = await response.json() as { policy?: PolicyConfig; version?: number };
-    if (!active.policy || typeof active.version !== "number") {
-      throw new Error("Active policy is unavailable.");
+  function exportPolicy() {
+    if (!currentPolicy) {
+      return;
     }
-    return { policy: active.policy, version: active.version };
-  }
 
-  async function exportPolicy() {
-    try {
-      const active = await loadActivePolicy();
-      const json = JSON.stringify(exportPolicyDocument(active.policy, active.version), null, 2);
-      const blob = new Blob([json], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `policy-v${Date.now()}.json`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (error) {
-      setImportState({ status: "error", error: error instanceof Error ? error.message : "Export failed." });
-    }
+    const json = JSON.stringify(currentPolicy, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `policy-v${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   /**
@@ -74,7 +65,7 @@ export function PolicyImportExport({
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = async (e) => {
+    reader.onload = (e) => {
       try {
         const content = e.target?.result as string;
         setImportState({ status: "validating", content });
@@ -91,23 +82,47 @@ export function PolicyImportExport({
           return;
         }
 
-        const result = parsePolicyImport(parsed);
-        if (!result.ok) {
-          setImportState({ status: "error", error: result.error });
+        // Run the migration chain before schema validation so the editor
+        // surfaces the same error the API/store would return.
+        let migrated: unknown;
+        try {
+          migrated = migratePolicyDocument(parsed);
+        } catch (err) {
+          if (err instanceof PolicyMigrationError) {
+            setImportState({
+              status: "error",
+              error: `Migration failed (version ${err.version}): ${err.message}`,
+            });
+            return;
+          }
+          setImportState({
+            status: "error",
+            error:
+              err instanceof Error
+                ? `Migration failed: ${err.message}`
+                : "Migration failed: unknown error",
+          });
           return;
         }
 
-        const active = await loadActivePolicy();
-        const mismatch = policyImportMatchesActive(result.document, active);
-        if (mismatch) {
-          setImportState({ status: "error", error: mismatch });
+        // Validate against schema
+        const result = policyConfigSchema.safeParse(migrated);
+        if (!result.success) {
+          const errors = result.error.issues
+            .map((e) => `${e.path.join(".") || "root"}: ${e.message}`)
+            .join("\n");
+          setImportState({
+            status: "error",
+            error: `Schema validation failed:\n${errors}`,
+          });
           return;
         }
 
+        // All good, show diff preview
         setImportState({
           status: "diff_preview",
-          document: result.document,
-          activePolicy: active.policy,
+          policy: result.data,
+          jsonContent: content,
         });
       } catch (err) {
         setImportState({
@@ -140,10 +155,18 @@ export function PolicyImportExport({
 
     setImporting(true);
     try {
-      await onImportApproved(importState.document);
+      await onImportApproved(importState.policy);
       setImportState({ status: "idle" });
-    } catch (error) {
-      setImportState({ status: "error", error: error instanceof Error ? error.message : "Import failed." });
+    } catch (err) {
+      setImportState({
+        status: "error",
+        error:
+          err instanceof PolicyMigrationError
+            ? `Migration failed (version ${err.version}): ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : "Import failed: unknown error",
+      });
     } finally {
       setImporting(false);
     }
@@ -169,7 +192,7 @@ export function PolicyImportExport({
         <CardContent className="flex flex-wrap gap-3">
           <Button
             onClick={exportPolicy}
-            disabled={!currentPolicy || currentVersion === null || isLoading}
+            disabled={!currentPolicy || isLoading}
             variant="outline"
             className="gap-2"
           >
@@ -217,7 +240,7 @@ export function PolicyImportExport({
     return (
       <Card className="border-red-500/40">
         <CardHeader>
-          <CardTitle className="text-red-400">Policy Transfer Failed</CardTitle>
+          <CardTitle className="text-red-400">Import Failed</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <Alert className="border-red-500/40 bg-red-500/10">
@@ -237,8 +260,8 @@ export function PolicyImportExport({
   }
 
   // Diff preview state: show changes before saving
-  if (importState.status === "diff_preview") {
-    const diff = generatePolicyDiff(importState.activePolicy, importState.document.policy);
+  if (importState.status === "diff_preview" && currentPolicy) {
+    const diff = generatePolicyDiff(currentPolicy, importState.policy);
     const grouped = groupDiffChanges(diff);
 
     return (
@@ -299,7 +322,7 @@ export function PolicyImportExport({
               View raw JSON
             </summary>
             <pre className="mt-2 overflow-auto rounded bg-[hsl(var(--muted)/0.4)] p-2 text-xs max-h-48">
-              {JSON.stringify(importState.document, null, 2)}
+              {importState.jsonContent}
             </pre>
           </details>
 
