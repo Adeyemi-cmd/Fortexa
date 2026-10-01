@@ -140,7 +140,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const userId = `wallet:${normalizedWallet}`;
+    const userId = await userIdForWallet(normalizedWallet);
 
     await upsertUserWallet(userId, {
       publicKey: normalizedWallet,

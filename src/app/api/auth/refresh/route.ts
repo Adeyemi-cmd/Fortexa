@@ -9,7 +9,8 @@ import { getRequestLogContext, logInfo, logWarn } from "@/lib/observability/logg
 export async function POST(request: NextRequest) {
   const startedAtMs = Date.now();
   const context = getRequestLogContext(request, "/api/auth/refresh");
-  const auth = requireAuth(request);
+  // A logged-out session must not be able to mint a new generation.
+  const auth = await requireActiveAuth(request);
 
   if (!auth.ok) {
     logWarn("Auth refresh unauthorized", context);

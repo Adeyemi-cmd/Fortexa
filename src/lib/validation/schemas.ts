@@ -80,10 +80,19 @@ export const decisionRequestSchema = z
     paymentQuote: paymentQuoteInputSchema.optional(),
     paymentQuoteInput: paymentQuoteInputSchema.optional(),
   })
-  .refine((data) => Boolean(data.scenarioId || data.action || data.paymentQuote || data.paymentQuoteInput), {
-    message: "Either scenarioId, action, or paymentQuote must be provided.",
-    path: ["scenarioId"],
-  });
+  .refine(
+    (data) =>
+      Boolean(
+        data.scenarioId ||
+        data.action ||
+        data.paymentQuote ||
+        data.paymentQuoteInput,
+      ),
+    {
+      message: "Either scenarioId, action, or paymentQuote must be provided.",
+      path: ["scenarioId"],
+    },
+  );
 
 export const stellarSetupRequestSchema = z.object({
   provider: z.string().trim().min(1).max(60).optional(),
@@ -107,8 +116,23 @@ export const stellarBuildPaymentRequestSchema = z.object({
   requestTimestampMs: z.number().finite().optional(),
 });
 
+const decisionReceiptSchema = z.object({
+  destination: stellarPublicKeySchema,
+  amountXLM: z.string().refine(isValidPaymentAmountString, {
+    message: PAYMENT_AMOUNT_ERROR,
+  }),
+  asset: z.enum(["native"]).default("native"),
+  memo: z.string().min(1).max(28),
+  network: z.enum(["testnet"]).default("testnet"),
+  receiptHash: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .optional(),
+});
+
 export const stellarSubmitSignedRequestSchema = z.object({
   signedXdr: z.string().min(20).max(120000),
+  decisionReceipt: decisionReceiptSchema,
   idempotencyKey: idempotencyKeySchema.optional(),
 });
 
@@ -164,4 +188,6 @@ export const policySimulateRequestSchema = z.object({
 export type AgentActionInput = z.infer<typeof agentActionSchema>;
 export type DecisionRequestInput = z.infer<typeof decisionRequestSchema>;
 export type AgentPlanRequestInput = z.infer<typeof agentPlanRequestSchema>;
-export type PolicySimulateRequestInput = z.infer<typeof policySimulateRequestSchema>;
+export type PolicySimulateRequestInput = z.infer<
+  typeof policySimulateRequestSchema
+>;

@@ -160,13 +160,15 @@ function isTimeoutFailure(error: unknown): boolean {
 }
 
 /**
- * Fetch blocklist with timeout support. Returns findings if successful, empty array if blocked/timed out/failed.
- * Returns status indicating what happened.
+ * Fetch the blocklist and report whether the feed was reachable.
+ * `fetchBlocklist` enforces its own timeout and rethrows fetch failures; on
+ * failure we fall back to an empty list and report the degraded status.
  */
 async function fetchBlocklistWithTimeout(): Promise<{
   blocklist: string[];
   status: { blocked: boolean; timedOut: boolean; error?: string };
 }> {
+  const timeoutMs = getAnalyzerConfig().blocklistTimeoutMs;
   try {
     const blocklist = await fetchBlocklist();
     const health = getBlocklistHealth();

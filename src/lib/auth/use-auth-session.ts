@@ -12,13 +12,6 @@ type SessionPayload = {
   };
 };
 
-function parseWalletFromEmail(email: string | null | undefined) {
-  if (!email?.startsWith("wallet:")) {
-    return null;
-  }
-  return email.slice("wallet:".length);
-}
-
 export function useAuthSession() {
   const [loading, setLoading] = useState(true);
   const [authenticated, setAuthenticated] = useState(false);
@@ -76,7 +69,7 @@ export function useAuthSession() {
         setAuthenticated(true);
         setEmail(payload.user.email ?? null);
         setRole(payload.user.role);
-        setWallet(parseWalletFromEmail(payload.user.email));
+        setWallet(getWalletFromSession(payload.user));
 
         const now = Math.floor(Date.now() / 1000);
         const exp = payload.user.exp ?? 0;

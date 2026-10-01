@@ -107,7 +107,41 @@ describe("/api/auth/login challenge-signature flow", () => {
 
     expect(second.status).toBe(400);
     const payload = (await second.json()) as { error: string };
-    expect(payload.error).toContain("already used");
+    expect(payload.error).toContain("invalid or expired");
+    expect(second.cookies.get(AUTH_COOKIE_KEY)).toBeUndefined();
+  });
+
+  it("rejects another key's signature and consumes the challenge without a session", async () => {
+    process.env.FORTEXA_AUTH_SECRET = "login-route-test-secret";
+    process.env.FORTEXA_OPERATOR_WALLETS = AUTHORIZED_PUBLIC_KEY;
+
+    const challenge = await issueChallenge(AUTHORIZED_PUBLIC_KEY);
+    const otherKeypair = Keypair.random();
+    const response = await login(new NextRequest("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        publicKey: otherKeypair.publicKey(),
+        challengeId: challenge.challengeId,
+        signature: signSep53Message(otherKeypair.secret(), challenge.message),
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(response.cookies.get(AUTH_COOKIE_KEY)).toBeUndefined();
+
+    const retry = await login(new NextRequest("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        publicKey: AUTHORIZED_PUBLIC_KEY,
+        challengeId: challenge.challengeId,
+        signature: signSep53Message(AUTHORIZED_SECRET, challenge.message),
+      }),
+    }));
+
+    expect(retry.status).toBe(400);
+    expect(retry.cookies.get(AUTH_COOKIE_KEY)).toBeUndefined();
   });
 
   it("rejects expired challenges", async () => {

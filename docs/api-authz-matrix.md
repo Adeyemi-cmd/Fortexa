@@ -31,7 +31,7 @@ Session tokens are signed HMAC-SHA256 cookies (`fortexa_session`) carrying a gen
 
 | Method | Route | Access Level | Unauthenticated | Viewer | State-Changing | Notes |
 |--------|-------|-------------|-----------------|--------|----------------|-------|
-| GET | `/api/health` | Public | 200 | 200 | No | Returns service health and env flags; no auth required |
+| GET | `/api/health` | Public | 200 | 200 | No | Returns service health, env flags, and the `ready`/`failingChecks` readiness verdict the dashboard gates actions on; no auth required |
 | GET | `/api/metrics` | operator only | 401 | 403 | No | Returns Prometheus or JSON metrics snapshot |
 
 ### Audit Routes

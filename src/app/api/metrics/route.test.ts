@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 
 import { AUTH_COOKIE_KEY, createSessionToken } from "@/lib/auth/session";
-import { resetMetrics } from "@/lib/observability/metrics";
+import {
+  recordApiMetric,
+  recordDecisionOutcome,
+  recordStellarSubmitResult,
+  resetMetrics,
+} from "@/lib/observability/metrics";
 import { GET } from "@/app/api/metrics/route";
 
 function operatorCookie() {
@@ -133,11 +138,59 @@ describe("/api/metrics route", () => {
 
     const lines = text.trim().split("\n");
     for (const line of lines) {
-      if (line.startsWith("fortexa_")) {
+      if (
+        line.startsWith("fortexa_requests_total{") ||
+        line.startsWith("fortexa_request_errors_total{") ||
+        line.startsWith("fortexa_request_duration_ms_p95{")
+      ) {
         expect(line).toMatch(/route="[^"]+"/);
         expect(line).toMatch(/method="[^"]+"/);
       }
     }
+  });
+
+  it("emits allow, deny, and submit counters without destination labels or secrets", async () => {
+    const destinationWallet = "GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR";
+    const fixtureSecret = "fixture-secret-must-not-leak";
+
+    recordApiMetric({
+      route: `/api/stellar/pay?destination=${destinationWallet}&memo=paid for coffee&error=${fixtureSecret}`,
+      method: "POST",
+      statusCode: 200,
+      durationMs: 5,
+    });
+    recordApiMetric({
+      route: `/api/stellar/pay/${destinationWallet}`,
+      method: "POST",
+      statusCode: 400,
+      durationMs: 5,
+    });
+    recordDecisionOutcome("APPROVE");
+    recordDecisionOutcome("BLOCK");
+    recordStellarSubmitResult("success");
+
+    const request = new NextRequest("http://localhost/api/metrics?format=prometheus", {
+      headers: { cookie: operatorCookie() },
+    });
+
+    const response = await GET(request);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/plain");
+    expect(response.headers.get("content-type")).toContain("version=0.0.4");
+
+    const body = await response.text();
+
+    expect(body).toContain('outcome="APPROVE"');
+    expect(body).toContain('outcome="BLOCK"');
+    expect(body).toContain("fortexa_stellar_submit_results_total");
+    expect(body).toContain('result="success"');
+
+    expect(body).not.toContain("destination");
+    expect(body).not.toContain("memo");
+    expect(body).not.toContain(destinationWallet);
+    expect(body).not.toContain("coffee");
+    expect(body).not.toContain(fixtureSecret);
+    expect(body).not.toContain("metrics-test-secret");
   });
 
   it("returns 403 for viewer role", async () => {
