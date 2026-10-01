@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 429,
-      body: { error: "Too many login attempts. Try again later." },
+      body: { error: "Too many login attempts. Try again later.", code: "rate_limited" },
       headers: rateLimitHeaders(rate),
     });
   }
@@ -65,7 +65,11 @@ export async function POST(request: NextRequest) {
         route: "/api/auth/login",
         startedAtMs,
         status: 400,
-        body: { error: "Invalid login payload.", details: toPublicValidationDetails(parsed.error) },
+        body: {
+          error: "Invalid login payload.",
+          code: "invalid_payload",
+          details: toPublicValidationDetails(parsed.error),
+        },
         headers: rateLimitHeaders(rate),
       });
     }
@@ -81,6 +85,7 @@ export async function POST(request: NextRequest) {
         status: 423,
         body: {
           error: "Account login is temporarily locked due to failed attempts.",
+          code: "locked",
           retryAfterSeconds: lockState.retryAfterSeconds,
         },
         headers: {
@@ -114,6 +119,7 @@ export async function POST(request: NextRequest) {
           error: failure?.justLocked
             ? `${challengeErrorMessage(challengeResult.code)} Login temporarily locked due to repeated failures.`
             : challengeErrorMessage(challengeResult.code),
+          code: challengeResult.code,
           retryAfterSeconds: failure?.justLocked
             ? Math.max(1, Math.ceil((failure.lockedUntilMs - Date.now()) / 1000))
             : undefined,
@@ -135,6 +141,7 @@ export async function POST(request: NextRequest) {
           error: failure.justLocked
             ? "Wallet is not authorized. Login temporarily locked due to repeated failures."
             : "Wallet is not authorized.",
+          code: "wallet_not_authorized",
         },
         headers: rateLimitHeaders(rate),
       });
@@ -194,7 +201,7 @@ export async function POST(request: NextRequest) {
       route: "/api/auth/login",
       startedAtMs,
       status: 500,
-      body: { error: error instanceof Error ? error.message : "Login failed." },
+      body: { error: error instanceof Error ? error.message : "Login failed.", code: "internal_error" },
       headers: rateLimitHeaders(rate),
     });
   }

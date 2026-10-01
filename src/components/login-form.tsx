@@ -1,13 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ExternalLink, Loader2, Wallet } from "lucide-react";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { loginWithFreighter, type LoginWithFreighterStep } from "@/lib/auth/freighter";
+import {
+  formatLoginError,
+  loginWithFreighter,
+  type LoginChallenge,
+  type LoginWithFreighterStep,
+} from "@/lib/auth/freighter";
 import { truncateMiddle } from "@/lib/utils/format";
 
 export function LoginForm() {
@@ -20,6 +25,11 @@ export function LoginForm() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [successWallet, setSuccessWallet] = useState<string | null>(null);
+  // The challenge for the attempt in flight. loginWithFreighter empties it
+  // after every outcome, so a later click always fetches a fresh one.
+  const challengeRef = useRef<LoginChallenge | null>(null);
+  // Blocks a second click that lands before the disabled state re-renders.
+  const signInInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -43,6 +53,11 @@ export function LoginForm() {
   }, [router, nextPath]);
 
   async function handleSignIn() {
+    if (signInInFlightRef.current) {
+      return;
+    }
+    signInInFlightRef.current = true;
+
     setLoading(true);
     setError(null);
     setSuccessWallet(null);
@@ -50,19 +65,18 @@ export function LoginForm() {
 
     const result = await loginWithFreighter({
       onStep: (step) => setLoginStep(step),
+      challengeSlot: challengeRef,
     });
 
     if (!result.ok) {
-      setError(
-        result.retryAfterSeconds
-          ? `${result.message} Try again in ${result.retryAfterSeconds}s.`
-          : result.message
-      );
+      setError(formatLoginError(result));
       setLoading(false);
       setLoginStep(null);
+      signInInFlightRef.current = false;
       return;
     }
 
+    // Stay in flight while the browser navigates away.
     setSuccessWallet(result.wallet);
     const destination = nextPath.startsWith("/") ? nextPath : "/dashboard";
     window.location.assign(destination);
